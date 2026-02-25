@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from engine import EngineStateModel
 
 # --------------------------------------------------
 # PAGE CONFIG
@@ -95,13 +96,29 @@ num_points = st.sidebar.slider(
     disabled=uploaded_file is not None
 )
 anomaly_threshold = st.sidebar.slider("Anomaly Threshold", 2.0, 5.0, 3.0)
+base_throttle = st.sidebar.slider(
+    "Base Throttle",
+    0.10,
+    0.90,
+    0.55,
+    0.01,
+    disabled=uploaded_file is not None
+)
+throttle_variation = st.sidebar.slider(
+    "Throttle Variation",
+    0.05,
+    0.40,
+    0.20,
+    0.01,
+    disabled=uploaded_file is not None
+)
 
 # --------------------------------------------------
 # DATA SOURCE (UPLOADED CSV OR SYNTHETIC)
 # --------------------------------------------------
 
 data = None
-source_label = "SYNTHETIC"
+source_label = "ENGINE MODEL"
 
 if uploaded_file is not None:
     try:
@@ -138,20 +155,18 @@ if uploaded_file is not None:
         st.sidebar.error(f"Could not read CSV: {exc}")
 
 if data is None:
-    np.random.seed(42)
-    time = np.arange(num_points)
-    engine_temp = 500 + np.sin(time / 30) * 20 + np.random.normal(0, 5, num_points)
-    anomaly_score = np.abs(np.random.normal(1, 0.5, num_points))
+    rng = np.random.default_rng(42)
+    phase = np.linspace(0.0, 6.0 * np.pi, num_points)
+    throttle_profile = (
+        base_throttle
+        + throttle_variation * np.sin(phase)
+        + 0.07 * np.sin(phase / 3.0 + 1.2)
+        + rng.normal(0.0, throttle_variation / 4.0, num_points)
+    )
+    throttle_profile = np.clip(throttle_profile, 0.0, 1.0)
 
-    spike_indices = np.random.choice(num_points, size=int(num_points * 0.05), replace=False)
-    engine_temp[spike_indices] += np.random.uniform(50, 100, len(spike_indices))
-    anomaly_score[spike_indices] += np.random.uniform(3, 5, len(spike_indices))
-
-    data = pd.DataFrame({
-        "time": time,
-        "engine_temp": engine_temp,
-        "anomaly_score": anomaly_score
-    })
+    model = EngineStateModel(rng_seed=42)
+    data = model.run_profile(throttle_profile, dt=0.5)
 
 anomalies = data[data["anomaly_score"] > anomaly_threshold]
 
@@ -210,7 +225,7 @@ fig.update_layout(
     legend=dict(font=dict(color="#00ff66"))
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # --------------------------------------------------
 # ANOMALY SCORE PLOT
@@ -251,7 +266,7 @@ fig2.update_layout(
     legend=dict(font=dict(color="#00ff66"))
 )
 
-st.plotly_chart(fig2, use_container_width=True)
+st.plotly_chart(fig2, width="stretch")
 
 # --------------------------------------------------
 # FOOTER
