@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 st.image("Untitled design (2).png", width=200)
-)
+
 
 # --------------------------------------------------
 # F-16 HUD STYLE
@@ -214,6 +214,7 @@ st.plotly_chart(fig2, use_container_width=True)
 
 st.markdown("<hr>", unsafe_allow_html=True)
 st.markdown("FALCONEYE FLIGHT ANALYTICS MODULE // READY")
+
 
 
 
