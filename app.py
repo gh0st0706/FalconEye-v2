@@ -9,8 +9,8 @@ import plotly.graph_objects as go
 
 st.set_page_config(
     page_title="FalconEye Flight Diagnostic",
-    layout="wide"
-    st.image("Untitled design (2).png", width=200)
+    layout="wide",
+    st.image("Untitled design (2).png", width=200),
 )
 
 # --------------------------------------------------
@@ -212,4 +212,5 @@ st.plotly_chart(fig2, use_container_width=True)
 
 st.markdown("<hr>", unsafe_allow_html=True)
 st.markdown("FALCONEYE FLIGHT ANALYTICS MODULE // READY")
+
 
