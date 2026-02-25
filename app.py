@@ -85,30 +85,73 @@ st.markdown("<hr>", unsafe_allow_html=True)
 
 st.sidebar.header("MISSION PARAMETERS")
 
-num_points = st.sidebar.slider("Telemetry Samples", 200, 2000, 500)
+uploaded_file = st.sidebar.file_uploader("Upload Telemetry CSV", type=["csv"])
+
+num_points = st.sidebar.slider(
+    "Telemetry Samples",
+    200,
+    2000,
+    500,
+    disabled=uploaded_file is not None
+)
 anomaly_threshold = st.sidebar.slider("Anomaly Threshold", 2.0, 5.0, 3.0)
 
 # --------------------------------------------------
-# SYNTHETIC TELEMETRY
+# DATA SOURCE (UPLOADED CSV OR SYNTHETIC)
 # --------------------------------------------------
 
-np.random.seed(42)
+data = None
+source_label = "SYNTHETIC"
 
-time = np.arange(num_points)
+if uploaded_file is not None:
+    try:
+        raw_data = pd.read_csv(uploaded_file)
+        normalized = {col.strip().lower(): col for col in raw_data.columns}
 
-engine_temp = 500 + np.sin(time / 30) * 20 + np.random.normal(0, 5, num_points)
-anomaly_score = np.abs(np.random.normal(1, 0.5, num_points))
+        required_cols = ["engine_temp", "anomaly_score"]
+        missing_cols = [col for col in required_cols if col not in normalized]
 
-# Inject random spikes
-spike_indices = np.random.choice(num_points, size=int(num_points * 0.05), replace=False)
-engine_temp[spike_indices] += np.random.uniform(50, 100, len(spike_indices))
-anomaly_score[spike_indices] += np.random.uniform(3, 5, len(spike_indices))
+        if missing_cols:
+            st.sidebar.error(
+                "CSV missing required columns: " + ", ".join(missing_cols)
+            )
+        else:
+            selected = pd.DataFrame({
+                "engine_temp": pd.to_numeric(raw_data[normalized["engine_temp"]], errors="coerce"),
+                "anomaly_score": pd.to_numeric(raw_data[normalized["anomaly_score"]], errors="coerce")
+            })
 
-data = pd.DataFrame({
-    "time": time,
-    "engine_temp": engine_temp,
-    "anomaly_score": anomaly_score
-})
+            if "time" in normalized:
+                selected["time"] = pd.to_numeric(raw_data[normalized["time"]], errors="coerce")
+            else:
+                selected["time"] = np.arange(len(selected))
+
+            data = selected[["time", "engine_temp", "anomaly_score"]].dropna()
+
+            if data.empty:
+                st.sidebar.error("CSV loaded but no valid numeric rows were found.")
+            else:
+                source_label = "UPLOADED CSV"
+                st.sidebar.success(f"Loaded {len(data)} rows from CSV")
+
+    except Exception as exc:
+        st.sidebar.error(f"Could not read CSV: {exc}")
+
+if data is None:
+    np.random.seed(42)
+    time = np.arange(num_points)
+    engine_temp = 500 + np.sin(time / 30) * 20 + np.random.normal(0, 5, num_points)
+    anomaly_score = np.abs(np.random.normal(1, 0.5, num_points))
+
+    spike_indices = np.random.choice(num_points, size=int(num_points * 0.05), replace=False)
+    engine_temp[spike_indices] += np.random.uniform(50, 100, len(spike_indices))
+    anomaly_score[spike_indices] += np.random.uniform(3, 5, len(spike_indices))
+
+    data = pd.DataFrame({
+        "time": time,
+        "engine_temp": engine_temp,
+        "anomaly_score": anomaly_score
+    })
 
 anomalies = data[data["anomaly_score"] > anomaly_threshold]
 
@@ -116,11 +159,12 @@ anomalies = data[data["anomaly_score"] > anomaly_threshold]
 # METRICS PANEL
 # --------------------------------------------------
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 
-col1.metric("TOTAL SAMPLES", num_points)
+col1.metric("TOTAL SAMPLES", len(data))
 col2.metric("TOTAL ANOMALIES", len(anomalies))
-col3.metric("SYSTEM STATUS", "STABLE" if len(anomalies) < num_points * 0.1 else "WARNING")
+col3.metric("SYSTEM STATUS", "STABLE" if len(anomalies) < len(data) * 0.1 else "WARNING")
+col4.metric("DATA SOURCE", source_label)
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
