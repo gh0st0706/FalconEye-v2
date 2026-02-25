@@ -14,13 +14,13 @@ st.set_page_config(
 )
 st.image("Untitled design (2).png", width=200)
 
-
 # --------------------------------------------------
 # F-16 HUD STYLE
 # --------------------------------------------------
 
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700&family=Rajdhani:wght@400;500;600;700&display=swap');
 
 .stApp {
     background-color: #000000;
@@ -28,13 +28,14 @@ st.markdown("""
 }
 
 html, body, [class*="css"] {
-    font-family: 'Courier New', monospace;
+    font-family: 'Rajdhani', 'Segoe UI', sans-serif;
     color: #00ff66;
 }
 
 h1, h2, h3 {
     color: #00ff66;
     letter-spacing: 2px;
+    font-family: 'Orbitron', 'Rajdhani', sans-serif;
 }
 
 section[data-testid="stSidebar"] {
@@ -71,7 +72,7 @@ hr {
 # --------------------------------------------------
 
 st.markdown("""
-<h1 style='text-align:center;'>
+<h1 style='text-align:center; font-family: Orbitron, Rajdhani, sans-serif;'>
 FALCONEYE // FLIGHT DIAGNOSTIC SYSTEM
 </h1>
 """, unsafe_allow_html=True)
@@ -149,7 +150,7 @@ fig.add_trace(go.Scatter(
 fig.update_layout(
     paper_bgcolor="black",
     plot_bgcolor="black",
-    font=dict(color="#00ff66", family="Courier New"),
+    font=dict(color="#00ff66", family="Rajdhani"),
     xaxis=dict(
         title="TIME",
         showgrid=True,
@@ -190,7 +191,7 @@ fig2.add_hline(
 fig2.update_layout(
     paper_bgcolor="black",
     plot_bgcolor="black",
-    font=dict(color="#00ff66", family="Courier New"),
+    font=dict(color="#00ff66", family="Rajdhani"),
     xaxis=dict(
         title="TIME",
         showgrid=True,
@@ -214,8 +215,3 @@ st.plotly_chart(fig2, use_container_width=True)
 
 st.markdown("<hr>", unsafe_allow_html=True)
 st.markdown("FALCONEYE FLIGHT ANALYTICS MODULE // READY")
-
-
-
-
-
