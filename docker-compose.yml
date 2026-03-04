@@ -1,0 +1,9 @@
+version: "3.9"
+
+services:
+  falconeye:
+    build: .
+    container_name: falconeye
+    ports:
+      - "8501:8501"
+    restart: unless-stopped

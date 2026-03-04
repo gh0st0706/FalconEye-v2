@@ -1,126 +1,68 @@
-FalconEye ✈
-Flight Telemetry Anomaly Detection System
+# FalconEye
 
-FalconEye is an interactive flight diagnostics dashboard designed to simulate real-time aircraft telemetry monitoring and anomaly detection.
+FalconEye is a flight telemetry diagnostics system with:
+- temporal engine state modeling,
+- explainable anomaly scoring,
+- streaming-friendly ingestion,
+- robust CSV normalization,
+- deployment-ready container infrastructure.
 
-It analyzes synthetic engine telemetry data and detects abnormal behavior using statistical and machine learning methods.
+## Core Improvements
 
-🚀 Live Features
+1. Temporal modeling
+- `EngineStateModel` now keeps rolling memory and trends.
+- Added degradation and sensor health dynamics over time.
+- Scoring includes transients and historical z-score drift.
 
-Interactive telemetry visualization (Zoom / Pan / Hover)
+2. Explainability
+- Each telemetry point includes:
+  - `anomaly_confidence`
+  - `primary_reason`
+  - `reason_codes`
+  - component scores (`temp_deviation_component`, `trend_component`, etc.)
+- Dashboard surfaces confidence and top contributor.
 
-Engine temperature monitoring
+3. Real-time processing
+- `StreamingTelemetryProcessor` supports record-wise ingestion.
+- Uses a bounded in-memory buffer for long-running sessions.
+- Accepts chunked ingestion to mimic live pipelines.
 
-Anomaly score analysis
+4. Robustness
+- Strict telemetry normalization via `normalize_telemetry_frame`.
+- Numeric coercion and invalid row handling.
+- Defensive checks for malformed input and invalid `dt`.
 
-Dynamic anomaly thresholding
+5. Deployment
+- `Dockerfile` for containerized runtime.
+- `docker-compose.yml` for one-command startup.
+- `.dockerignore` to keep images lean.
 
-Optional Isolation Forest ML detection
+## Project Layout
 
-F-16 inspired HUD-style cockpit interface
+- `app.py`: Streamlit UI and visualization.
+- `engine.py`: temporal simulation + explainable anomaly engine.
+- `stream_processor.py`: real-time ingestion and schema-safe normalization.
+- `test_engine.py`: engine behavior tests.
+- `test_stream_processor.py`: ingestion/normalization tests.
+- `Dockerfile`, `docker-compose.yml`: deployment assets.
 
-🧠 What Is Telemetry?
+## Local Run
 
-Telemetry is automatically collected sensor data transmitted from a system for monitoring.
-
-In aviation, telemetry may include:
-
-Engine temperature
-
-Fuel flow
-
-Vibration
-
-Altitude
-
-Airspeed
-
-FalconEye simulates such telemetry and applies anomaly detection logic to identify unusual system behavior.
-
-📊 Detection Methods
-1️⃣ Statistical Thresholding
-
-Anomalies are flagged when:
-
-anomaly_score > mean + (k × standard deviation)
-
-Where:
-
-k = sensitivity multiplier
-
-2️⃣ Isolation Forest (Optional)
-
-Uses unsupervised machine learning to isolate rare data patterns across multiple features.
-
-🛠 Tech Stack
-
-Python
-
-Streamlit
-
-Plotly
-
-NumPy
-
-Pandas
-
-Scikit-learn
-
-📂 Project Structure
-app.py
-requirements.txt
-README.md
-⚙ Installation (Local Run)
-
-Clone the repository:
-
-git clone https://github.com/YOUR_USERNAME/falconeye-flight-anomaly-detection.git
-cd falconeye-flight-anomaly-detection
-
-Install dependencies:
-
+```bash
 pip install -r requirements.txt
-
-Run the app:
-
 streamlit run app.py
-🌐 Deployment
+```
 
-This project can be deployed easily using:
+## Run Tests
 
-Streamlit Community Cloud
+```bash
+python -m unittest -v
+```
 
-Render
+## Docker Run
 
-Any Python-compatible VPS
+```bash
+docker compose up --build
+```
 
-🎯 Purpose
-
-This project demonstrates:
-
-Real-time data visualization
-
-Anomaly detection principles
-
-Statistical reasoning
-
-Machine learning application in telemetry systems
-
-UI/UX design inspired by aviation systems
-
-📌 Future Improvements
-
-Real CSV telemetry upload
-
-Rolling anomaly detection
-
-Multivariate ML model training
-
-Predictive maintenance scoring
-
-Gauge-based cockpit widgets
-
-Author
-
-Ricardo
-
+Then open `http://localhost:8501`.

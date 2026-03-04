@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from engine import EngineStateModel
+from stream_processor import StreamingTelemetryProcessor, normalize_telemetry_frame
 
 
 def _build_live_features(df: pd.DataFrame, anomaly_threshold: float) -> pd.DataFrame:
@@ -26,7 +27,10 @@ def _build_live_features(df: pd.DataFrame, anomaly_threshold: float) -> pd.DataF
         telemetry["fuel_flow"] = 220.0 + 0.045 * telemetry["rpm"]
 
     dt = telemetry["time"].diff().replace(0, np.nan)
-    telemetry["rpm_rate_of_change"] = telemetry["rpm"].diff().div(dt).fillna(0.0)
+    if "rpm_rate_of_change" not in telemetry.columns:
+        telemetry["rpm_rate_of_change"] = telemetry["rpm"].diff().div(dt).fillna(0.0)
+    if "temp_rate_of_change" not in telemetry.columns:
+        telemetry["temp_rate_of_change"] = telemetry["engine_temp"].diff().div(dt).fillna(0.0)
     telemetry["egt_rolling_mean"] = telemetry["engine_temp"].rolling(window=15, min_periods=1).mean()
     telemetry["vibration_rolling_std"] = telemetry["vibration"].rolling(window=15, min_periods=2).std().fillna(0.0)
 
@@ -47,6 +51,14 @@ def _build_live_features(df: pd.DataFrame, anomaly_threshold: float) -> pd.DataF
         roc_z = telemetry["rpm_rate_of_change"].abs() / (telemetry["rpm_rate_of_change"].rolling(20, min_periods=3).std().fillna(1.0) + 1e-6)
         telemetry["anomaly_score"] = (1.0 + 0.7 * temp_z + 0.7 * vib_z + 0.4 * roc_z).clip(lower=0.0)
 
+    if "anomaly_confidence" not in telemetry.columns:
+        confidence = (
+            1.0
+            - 0.06 * np.clip(telemetry["vibration_rolling_std"] / 0.05, 0.0, 1.0)
+            - 0.06 * np.clip(telemetry["rpm_rate_of_change"].abs() / 2500.0, 0.0, 1.0)
+        )
+        telemetry["anomaly_confidence"] = confidence.clip(0.20, 0.99)
+
     critical_mask = (
         (telemetry["anomaly_score"] >= anomaly_threshold * 1.7)
         | (telemetry["degradation_trend"] < -0.20)
@@ -58,6 +70,23 @@ def _build_live_features(df: pd.DataFrame, anomaly_threshold: float) -> pd.DataF
         | (telemetry["vibration_rolling_std"] > 0.04)
     )
     telemetry["risk_level"] = np.where(critical_mask, "Critical", np.where(warning_mask, "Warning", "Normal"))
+    telemetry["model_confidence_pct"] = (telemetry["anomaly_confidence"] * 100.0).clip(0.0, 100.0)
+
+    if "primary_reason" not in telemetry.columns:
+        temp_component = ((telemetry["engine_temp"] - telemetry["egt_rolling_mean"]).abs() / 30.0).clip(lower=0.0)
+        vib_component = (telemetry["vibration_rolling_std"] / 0.03).clip(lower=0.0)
+        trend_component = (-telemetry["degradation_trend"] / 0.04).clip(lower=0.0)
+        components = pd.DataFrame(
+            {
+                "temp_deviation": temp_component,
+                "vibration_excess": vib_component,
+                "efficiency_drop": trend_component,
+            }
+        )
+        telemetry["primary_reason"] = components.idxmax(axis=1)
+
+    if "reason_codes" not in telemetry.columns:
+        telemetry["reason_codes"] = np.where(telemetry["risk_level"] == "Normal", "NOMINAL", telemetry["primary_reason"].str.upper())
 
     return telemetry
 
@@ -72,6 +101,10 @@ def _system_interpretation(latest: pd.Series) -> str:
         findings.append("Efficiency degradation trend detected")
     if latest["risk_level"] == "Critical" and not findings:
         findings.append("Critical anomaly score elevation")
+    if "primary_reason" in latest:
+        findings.append(f"Top contributor: {str(latest['primary_reason']).replace('_', ' ')}")
+    if "anomaly_confidence" in latest:
+        findings.append(f"Model confidence: {latest['anomaly_confidence'] * 100.0:.1f}%")
     if not findings:
         findings.append("Engine telemetry stable and within expected envelope")
     return ". ".join(findings) + "."
@@ -159,6 +192,7 @@ st.markdown("<hr>", unsafe_allow_html=True)
 st.sidebar.header("MISSION PARAMETERS")
 
 uploaded_file = st.sidebar.file_uploader("Upload Telemetry CSV", type=["csv"])
+stream_chunk = st.sidebar.slider("Real-time Chunk Size", 10, 250, 40)
 
 presets = {
     "Idle / Ground": {"base": 0.15, "variation": 0.02, "desc": "Very stable, low RPM, low EGT, minimal vibration."},
@@ -226,36 +260,11 @@ if uploaded_file is not None:
     try:
         raw_data = pd.read_csv(uploaded_file)
         normalized = {col.strip().lower(): col for col in raw_data.columns}
-
-        required_cols = ["engine_temp"]
-        missing_cols = [col for col in required_cols if col not in normalized]
-
-        if missing_cols:
-            st.sidebar.error(
-                "CSV missing required columns: " + ", ".join(missing_cols)
-            )
-        else:
-            selected = pd.DataFrame({
-                "engine_temp": pd.to_numeric(raw_data[normalized["engine_temp"]], errors="coerce"),
-            })
-
-            if "time" in normalized:
-                selected["time"] = pd.to_numeric(raw_data[normalized["time"]], errors="coerce")
-            else:
-                selected["time"] = np.arange(len(selected))
-
-            optional_numeric_cols = ["rpm", "vibration", "fuel_flow", "efficiency", "anomaly_score"]
-            for col in optional_numeric_cols:
-                if col in normalized:
-                    selected[col] = pd.to_numeric(raw_data[normalized[col]], errors="coerce")
-
-            data = selected.dropna(subset=["time", "engine_temp"])
-
-            if data.empty:
-                st.sidebar.error("CSV loaded but no valid numeric rows were found.")
-            else:
-                source_label = "UPLOADED CSV"
-                st.sidebar.success(f"Loaded {len(data)} rows from CSV")
+        if "time" not in normalized:
+            raw_data["time"] = np.arange(len(raw_data))
+        data = normalize_telemetry_frame(raw_data)
+        source_label = "UPLOADED CSV"
+        st.sidebar.success(f"Loaded {len(data)} rows from CSV")
 
     except Exception as exc:
         st.sidebar.error(f"Could not read CSV: {exc}")
@@ -273,6 +282,12 @@ if data is None:
 
     model = EngineStateModel(rng_seed=42)
     data = model.run_profile(throttle_profile, dt=0.5)
+else:
+    processor = StreamingTelemetryProcessor(max_buffer_size=max(len(data), 1000))
+    records = data.to_dict("records")
+    for i in range(0, len(records), stream_chunk):
+        processor.ingest_records(records[i:i + stream_chunk])
+    data = processor.snapshot()
 
 data = _build_live_features(data, anomaly_threshold=anomaly_threshold)
 anomalies = data[data["anomaly_score"] > anomaly_threshold]
@@ -315,6 +330,18 @@ ml1, ml2 = st.columns(2)
 ml1.metric("ANOMALY SCORE", f"{latest['anomaly_score']:.2f}")
 ml2.metric("RISK LEVEL", latest["risk_level"])
 
+exp1, exp2, exp3 = st.columns(3)
+exp1.metric("MODEL CONFIDENCE", f"{latest['model_confidence_pct']:.1f}%")
+exp2.metric("PRIMARY REASON", str(latest["primary_reason"]).replace("_", " ").upper())
+exp3.metric("REASON CODES", str(latest["reason_codes"]))
+
+if "health_score" in data.columns or "sensor_health" in data.columns:
+    h1, h2 = st.columns(2)
+    if "health_score" in data.columns:
+        h1.metric("ENGINE HEALTH", f"{latest['health_score'] * 100.0:.1f}%")
+    if "sensor_health" in data.columns:
+        h2.metric("SENSOR HEALTH", f"{latest['sensor_health'] * 100.0:.1f}%")
+
 st.info(interpretation)
 
 st.markdown("#### LIVE FEATURE DATAFRAME")
@@ -331,6 +358,9 @@ st.dataframe(
             "vibration_rolling_std",
             "degradation_trend",
             "anomaly_score",
+            "anomaly_confidence",
+            "primary_reason",
+            "reason_codes",
             "risk_level",
         ]
     ].tail(60),

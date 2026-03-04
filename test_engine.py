@@ -17,6 +17,9 @@ class EngineStateModelTests(unittest.TestCase):
         self.assertGreater(snap["engine_temp"], 40.0)
         self.assertGreater(snap["fuel_flow"], 100.0)
         self.assertGreater(snap["vibration"], 0.0)
+        self.assertIn("anomaly_confidence", snap)
+        self.assertIn("primary_reason", snap)
+        self.assertIn("reason_codes", snap)
 
     def test_state_evolves_over_time(self) -> None:
         model = EngineStateModel(rng_seed=42)
@@ -26,6 +29,7 @@ class EngineStateModelTests(unittest.TestCase):
         self.assertAlmostEqual(second["time"], first["time"] + 0.5)
         self.assertNotEqual(first["rpm"], second["rpm"])
         self.assertNotEqual(first["engine_temp"], second["engine_temp"])
+        self.assertNotEqual(first["anomaly_score"], second["anomaly_score"])
 
     def test_throttle_increase_raises_rpm_and_temp(self) -> None:
         model = EngineStateModel(rng_seed=13)
@@ -56,6 +60,9 @@ class EngineStateModelTests(unittest.TestCase):
             "fuel_flow",
             "vibration",
             "anomaly_score",
+            "anomaly_confidence",
+            "primary_reason",
+            "reason_codes",
         }
 
         self.assertEqual(len(df), 40)
@@ -75,6 +82,15 @@ class EngineStateModelTests(unittest.TestCase):
             self.assertGreaterEqual(telemetry["vibration"], 0.03)
             self.assertLessEqual(telemetry["vibration"], 2.5)
             self.assertGreaterEqual(telemetry["anomaly_score"], 0.0)
+            self.assertGreaterEqual(telemetry["anomaly_confidence"], 0.20)
+            self.assertLessEqual(telemetry["anomaly_confidence"], 0.99)
+            self.assertTrue(str(telemetry["primary_reason"]))
+            self.assertTrue(str(telemetry["reason_codes"]))
+
+    def test_invalid_dt_raises(self) -> None:
+        model = EngineStateModel(rng_seed=1)
+        with self.assertRaises(ValueError):
+            model.step(0.5, dt=0.0)
 
 
 if __name__ == "__main__":
