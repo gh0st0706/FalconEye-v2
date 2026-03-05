@@ -190,6 +190,7 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
   const modelUrl = {json.dumps(model_data_uri)};
   const anomalyPayload = {json.dumps(anomaly_payload)};
   const handTrackingEnabled = {"true" if enable_hand_tracking else "false"};
+  const riskLevel = String((anomalyPayload && anomalyPayload.risk) || "normal").toLowerCase();
 
   function loadScript(url) {{
     return new Promise((resolve, reject) => {{
@@ -501,6 +502,7 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
       const anomalyRegions = (anomalyPayload && anomalyPayload.regions) ? anomalyPayload.regions : [];
       const red = new THREE.Color("#ff1a1a");
       const hull = new THREE.Color("#95a29b");
+      const engineTokens = ["engine", "nozzle", "turbine", "exhaust", "afterburner"];
 
       model.traverse(function(node) {{
         if (!node.isMesh) return;
@@ -515,6 +517,8 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
 
         const meshName = (node.name || "").toLowerCase();
         const hit = anomalyRegions.find((r) => meshMatches(meshName, r));
+        const isEngineMesh = engineTokens.some((token) => meshName.includes(token));
+        const engineWarning = isEngineMesh && (riskLevel === "warning" || riskLevel === "critical");
         if (hit) {{
           if (!node.material.emissive) node.material.emissive = red.clone();
           node.material.emissive.copy(red);
@@ -522,13 +526,20 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
           if (node.material.color) node.material.color.lerp(red, 0.55);
           node.material.opacity = 0.62;
           node.material.depthWrite = true;
+        }} else if (engineWarning) {{
+          if (!node.material.emissive) node.material.emissive = red.clone();
+          node.material.emissive.copy(red);
+          node.material.emissiveIntensity = 1.0;
+          if (node.material.color) node.material.color.lerp(red, 0.45);
+          node.material.opacity = 0.55;
+          node.material.depthWrite = true;
         }}
 
         const edges = new THREE.EdgesGeometry(node.geometry, 18);
         const edgeMat = new THREE.LineBasicMaterial({{
-          color: hit ? red : new THREE.Color("#7fffb2"),
+          color: (hit || engineWarning) ? red : new THREE.Color("#7fffb2"),
           transparent: true,
-          opacity: hit ? 1.0 : 0.95
+          opacity: (hit || engineWarning) ? 1.0 : 0.95
         }});
         const lines = new THREE.LineSegments(edges, edgeMat);
         lines.renderOrder = 2;
