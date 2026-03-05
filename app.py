@@ -208,6 +208,7 @@ const engineTokens = ["engine", "nozzle", "exhaust", "turbine", "afterburner"];
 const anomalyPayload = __ANOMALY_PAYLOAD__;
 const skeletonLineColor = new THREE.Color("#7fffb2");
 const skeletonSurfaceOpacity = 0.08;
+const anomalySurfaceOpacity = 0.62;
 const skeletonLineOpacity = 0.95;
 const skeletonEdgeAngle = 18;
 
@@ -328,16 +329,19 @@ loader.load(
         node.material.emissive.copy(regionColor);
         node.material.emissiveIntensity = 1.15;
         if (node.material.color) node.material.color.lerp(regionColor, 0.55);
+        node.material.opacity = anomalySurfaceOpacity;
+        node.material.depthWrite = true;
         highlightedCount += 1;
         if (region.label) anomalyLabels.push(region.label);
         break;
       }
 
+      const edgeColor = node.material.opacity >= anomalySurfaceOpacity ? regionColor : skeletonLineColor;
       const edges = new THREE.EdgesGeometry(node.geometry, skeletonEdgeAngle);
       const edgeMat = new THREE.LineBasicMaterial({
-        color: skeletonLineColor,
+        color: edgeColor,
         transparent: true,
-        opacity: skeletonLineOpacity
+        opacity: node.material.opacity >= anomalySurfaceOpacity ? 1.0 : skeletonLineOpacity
       });
       const edgeLines = new THREE.LineSegments(edges, edgeMat);
       edgeLines.renderOrder = 2;

@@ -134,6 +134,9 @@ export function createRafaleViewer(config) {
   const engineMeshes = [];
   const edgeOverlays = [];
   let skeletonEnabled = config.skeletonEnabled ?? true;
+  const baseSkeletonColor = config.skeletonColor || "#7fffb2";
+  const baseSkeletonLineOpacity = config.skeletonLineOpacity ?? 0.95;
+  const baseSkeletonSurfaceOpacity = config.skeletonSurfaceOpacity ?? 0.08;
 
   function debugHierarchy(node, depth = 0) {
     if (!debug) return;
@@ -260,6 +263,24 @@ export function createRafaleViewer(config) {
     edgeOverlays.length = 0;
   }
 
+  function setMeshEdgeColor(mesh, color, opacity = 1.0) {
+    for (const child of mesh.children || []) {
+      if (!child.isLineSegments || !child.material) continue;
+      if (child.material.color) child.material.color.set(color);
+      child.material.opacity = opacity;
+      child.material.transparent = true;
+      child.material.needsUpdate = true;
+    }
+  }
+
+  function resetAllEdgeColors() {
+    if (!aircraft) return;
+    aircraft.traverse((obj) => {
+      if (!obj.isMesh) return;
+      setMeshEdgeColor(obj, baseSkeletonColor, baseSkeletonLineOpacity);
+    });
+  }
+
   function applySkeletonView(
     model,
     { enabled = true, lineColor = "#7fffb2", lineOpacity = 0.95, surfaceOpacity = 0.08, thresholdAngle = 18 } = {}
@@ -321,6 +342,7 @@ export function createRafaleViewer(config) {
         if (!obj.isMesh || !obj.material) return;
         restoreMaterial(obj);
       });
+      if (skeletonEnabled) resetAllEdgeColors();
     } else {
       for (const mesh of engineMeshes) restoreMaterial(mesh);
     }
@@ -347,7 +369,7 @@ export function createRafaleViewer(config) {
 
   function highlightAnomalyRegions(
     regions = [],
-    { color = "#ff1a1a", intensity = 1.15, clearExisting = true, fallbackToEngine = true } = {}
+    { color = "#ff1a1a", intensity = 1.15, clearExisting = true, fallbackToEngine = true, surfaceOpacity = 0.62 } = {}
   ) {
     if (!aircraft) return [];
     if (clearExisting) clearAnomalyHighlight();
@@ -378,7 +400,11 @@ export function createRafaleViewer(config) {
       if (!obj.material.emissive) obj.material.emissive = colorObj.clone();
       obj.material.emissive.copy(colorObj);
       obj.material.emissiveIntensity = intensity;
+      obj.material.transparent = true;
+      obj.material.opacity = surfaceOpacity;
+      obj.material.depthWrite = true;
       obj.material.needsUpdate = true;
+      if (skeletonEnabled) setMeshEdgeColor(obj, color, 1.0);
       matched.push({ mesh: obj.name || "(unnamed)", region: hitRegion.label });
     });
 
@@ -390,7 +416,11 @@ export function createRafaleViewer(config) {
         if (!mesh.material.emissive) mesh.material.emissive = colorObj.clone();
         mesh.material.emissive.copy(colorObj);
         mesh.material.emissiveIntensity = intensity;
+        mesh.material.transparent = true;
+        mesh.material.opacity = surfaceOpacity;
+        mesh.material.depthWrite = true;
         mesh.material.needsUpdate = true;
+        if (skeletonEnabled) setMeshEdgeColor(mesh, color, 1.0);
         matched.push({ mesh: mesh.name || "(unnamed)", region: "engine-fallback" });
       }
     }
@@ -472,9 +502,9 @@ export function createRafaleViewer(config) {
     collectEngineMeshes(aircraft, config.engineTokens || DEFAULT_ENGINE_TOKENS);
     applySkeletonView(aircraft, {
       enabled: skeletonEnabled,
-      lineColor: config.skeletonColor || "#7fffb2",
-      lineOpacity: config.skeletonLineOpacity ?? 0.95,
-      surfaceOpacity: config.skeletonSurfaceOpacity ?? 0.08,
+      lineColor: baseSkeletonColor,
+      lineOpacity: baseSkeletonLineOpacity,
+      surfaceOpacity: baseSkeletonSurfaceOpacity,
       thresholdAngle: config.skeletonThresholdAngle ?? 18,
     });
 
