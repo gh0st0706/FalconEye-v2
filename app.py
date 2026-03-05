@@ -904,7 +904,6 @@ st.set_page_config(
     page_icon="Untitled design (2).png",
     layout="wide"
 )
-st.image("Untitled design (2).png", width=200)
 
 # --------------------------------------------------
 # F-16 HUD STYLE
@@ -912,7 +911,7 @@ st.image("Untitled design (2).png", width=200)
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700&family=Rajdhani:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@500;600;700&family=Orbitron:wght@600;700&family=Rajdhani:wght@400;500;600;700&display=swap');
 
 .stApp {
     background-color: #000000;
@@ -927,7 +926,31 @@ html, body, [class*="css"] {
 h1, h2, h3 {
     color: #00ff66;
     letter-spacing: 2px;
-    font-family: 'Orbitron', 'Rajdhani', sans-serif;
+    font-family: 'Exo 2', 'Orbitron', 'Rajdhani', sans-serif;
+}
+
+.falcon-header {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    height: 100%;
+}
+
+.falcon-title {
+    color: #00ff66;
+    font-family: 'Exo 2', 'Orbitron', 'Rajdhani', sans-serif;
+    font-size: 2.0rem;
+    letter-spacing: 1.2px;
+    font-weight: 700;
+    line-height: 1.1;
+}
+
+.falcon-subtitle {
+    color: #65ff9a;
+    font-family: 'Rajdhani', 'Exo 2', sans-serif;
+    font-size: 1.0rem;
+    letter-spacing: 0.8px;
+    margin-top: 4px;
 }
 
 section[data-testid="stSidebar"] {
@@ -963,11 +986,21 @@ hr {
 # HEADER
 # --------------------------------------------------
 
-st.markdown("""
-<h1 style='text-align:center; font-family: Orbitron, Rajdhani, sans-serif;'>
-FALCONEYE // FLIGHT DIAGNOSTIC SYSTEM
-</h1>
-""", unsafe_allow_html=True)
+brand_logo_col, brand_title_col = st.columns([1, 9], vertical_alignment="center")
+
+with brand_logo_col:
+    st.image("Untitled design (2).png", width=90)
+
+with brand_title_col:
+    st.markdown(
+        """
+        <div class='falcon-header'>
+          <div class='falcon-title'>FALCONEYE // FLIGHT DIAGNOSTIC SYSTEM</div>
+          <div class='falcon-subtitle'>Tactical Engine Analytics + 3D Digital Twin</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
