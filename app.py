@@ -273,6 +273,13 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
   const desiredRotation = {{ x: 0, y: 0, z: 0 }};
   let handPaused = false;
   let lastPinchDist = null;
+  let pinchActive = false;
+  let lastPalmX = null;
+  let lastPalmY = null;
+  let lastPalmZ = null;
+  let lastPalmTwist = null;
+  const pinchEnterThreshold = 0.048;
+  const pinchExitThreshold = 0.065;
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.7));
   const key = new THREE.DirectionalLight(0xffffff, 1.1);
@@ -304,13 +311,40 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
     return tokens.some((t) => meshName.includes(String(t).toLowerCase()));
   }}
 
+  function pointDist(a, b) {{
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    const dz = (a.z || 0) - (b.z || 0);
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  }}
+
+  function isFingerCurled(lm, tip, pip, mcp) {{
+    return lm[tip].y > lm[pip].y && lm[tip].y > (lm[mcp].y - 0.01);
+  }}
+
+  function countExtendedFingers(lm) {{
+    let count = 0;
+    if (lm[8].y < lm[6].y) count += 1;
+    if (lm[12].y < lm[10].y) count += 1;
+    if (lm[16].y < lm[14].y) count += 1;
+    if (lm[20].y < lm[18].y) count += 1;
+    return count;
+  }}
+
   function detectFist(lm) {{
-    return (
-      lm[8].y > lm[6].y &&
-      lm[12].y > lm[10].y &&
-      lm[16].y > lm[14].y &&
-      lm[20].y > lm[18].y
-    );
+    const indexCurled = isFingerCurled(lm, 8, 6, 5);
+    const middleCurled = isFingerCurled(lm, 12, 10, 9);
+    const ringCurled = isFingerCurled(lm, 16, 14, 13);
+    const pinkyCurled = isFingerCurled(lm, 20, 18, 17);
+    const curledCount = [indexCurled, middleCurled, ringCurled, pinkyCurled].filter(Boolean).length;
+    const thumbFolded = pointDist(lm[4], lm[2]) < 0.08 && pointDist(lm[4], lm[5]) < 0.10;
+    const palmCompact = (
+      pointDist(lm[8], lm[0]) +
+      pointDist(lm[12], lm[0]) +
+      pointDist(lm[16], lm[0]) +
+      pointDist(lm[20], lm[0])
+    ) / 4.0 < 0.24;
+    return curledCount >= 3 && thumbFolded && palmCompact;
   }}
 
   function detectOpenPalm(lm) {{
@@ -322,11 +356,27 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
     );
   }}
 
-  function detectPinch(lm) {{
-    const dx = lm[4].x - lm[8].x;
-    const dy = lm[4].y - lm[8].y;
-    const dz = (lm[4].z || 0) - (lm[8].z || 0);
-    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  function detectPinch(lm, isFistNow) {{
+    const pinchDist = pointDist(lm[4], lm[8]);
+    const extendedCount = countExtendedFingers(lm);
+    const pinchGate = pinchActive ? pinchExitThreshold : pinchEnterThreshold;
+    const isPinch = !isFistNow && extendedCount >= 1 && pinchDist < pinchGate;
+    return {{ isPinch, pinchDist }};
+  }}
+
+  function wrapAngleDelta(delta) {{
+    while (delta > Math.PI) delta -= Math.PI * 2.0;
+    while (delta < -Math.PI) delta += Math.PI * 2.0;
+    return delta;
+  }}
+
+  // "Holding a ball" gesture: not fist, not pinch, partially open curved hand.
+  function isBallHoldGesture(lm, isFistNow, pinchNow) {{
+    if (isFistNow || pinchNow) return false;
+    const extended = countExtendedFingers(lm);
+    const pinchDist = pointDist(lm[4], lm[8]);
+    const thumbAway = pinchDist > 0.07;
+    return extended >= 1 && extended <= 3 && thumbAway;
   }}
 
   async function initHandTracking() {{
@@ -350,39 +400,75 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
       const lm = results.multiHandLandmarks[0];
       if (!lm || lm.length < 21) return;
 
-      if (detectFist(lm) && !handPaused) {{
+      const isFistNow = detectFist(lm);
+      if (isFistNow && !handPaused) {{
         handPaused = true;
+        pinchActive = false;
+        lastPinchDist = null;
         statusEl.textContent = "Tracking paused (fist)";
         return;
       }}
       if (handPaused) {{
         if (detectOpenPalm(lm)) {{
           handPaused = false;
+          lastPalmX = null;
+          lastPalmY = null;
+          lastPalmZ = null;
+          lastPalmTwist = null;
           statusEl.textContent = "Tracking resumed";
         }}
         return;
       }}
 
-      const cx = lm[9].x;
-      const cy = lm[9].y;
-      desiredRotation.y = THREE.MathUtils.clamp((cx - 0.5) * -2.4, -1.15, 1.15);
-      desiredRotation.x = THREE.MathUtils.clamp((0.5 - cy) * 2.1, -0.78, 0.78);
-      desiredRotation.z = THREE.MathUtils.clamp(Math.atan2(lm[5].y - lm[17].y, lm[5].x - lm[17].x) * 0.9, -0.95, 0.95);
-
-      const pinchDist = detectPinch(lm);
-      if (pinchDist < 0.055) {{
+      const pinchState = detectPinch(lm, isFistNow);
+      pinchActive = pinchState.isPinch;
+      if (pinchState.isPinch) {{
         if (lastPinchDist !== null) {{
-          const delta = pinchDist - lastPinchDist;
+          const delta = pinchState.pinchDist - lastPinchDist;
           const toCam = camera.position.clone().sub(controls.target).normalize();
           const cur = camera.position.distanceTo(controls.target);
           const next = THREE.MathUtils.clamp(cur + delta * 36.0, 4.5, 26.0);
           camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(next)));
           statusEl.textContent = "Pinch zoom active";
         }}
-        lastPinchDist = pinchDist;
+        lastPinchDist = pinchState.pinchDist;
+        lastPalmX = null;
+        lastPalmY = null;
+        lastPalmZ = null;
+        lastPalmTwist = null;
       }} else {{
         lastPinchDist = null;
-        statusEl.textContent = "Hand tracking active";
+        const cx = lm[9].x;
+        const cy = lm[9].y;
+        const cz = lm[9].z || 0;
+        const palmTwist = Math.atan2(lm[5].y - lm[17].y, lm[5].x - lm[17].x);
+        const ballHold = isBallHoldGesture(lm, isFistNow, pinchState.isPinch);
+
+        if (ballHold) {{
+          if (lastPalmX !== null && lastPalmY !== null) {{
+            const dx = cx - lastPalmX;
+            const dy = cy - lastPalmY;
+            const dz = cz - lastPalmZ;
+            desiredRotation.y = THREE.MathUtils.clamp(desiredRotation.y - dx * 8.8, -1.20, 1.20);
+            desiredRotation.x = THREE.MathUtils.clamp(desiredRotation.x - dy * 8.2 - dz * 2.3, -0.85, 0.85);
+          }}
+          if (lastPalmTwist !== null) {{
+            const dTwist = wrapAngleDelta(palmTwist - lastPalmTwist);
+            desiredRotation.z = THREE.MathUtils.clamp(desiredRotation.z + dTwist * 2.0, -1.05, 1.05);
+          }}
+          statusEl.textContent = "Ball-grip rotate active";
+        }} else {{
+          // Fallback absolute mapping if hand isn't in the "ball hold" shape.
+          desiredRotation.y = THREE.MathUtils.clamp((cx - 0.5) * -2.9, -1.20, 1.20);
+          desiredRotation.x = THREE.MathUtils.clamp((0.5 - cy) * 2.5, -0.85, 0.85);
+          desiredRotation.z = THREE.MathUtils.clamp(palmTwist * 1.05, -1.05, 1.05);
+          statusEl.textContent = "Hand tracking active";
+        }}
+
+        lastPalmX = cx;
+        lastPalmY = cy;
+        lastPalmZ = cz;
+        lastPalmTwist = palmTwist;
       }}
     }});
 
@@ -498,9 +584,9 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
 
   function animate() {{
     if (trackedModel && handTrackingEnabled && !handPaused) {{
-      trackedModel.rotation.x = THREE.MathUtils.lerp(trackedModel.rotation.x, baseRotation.x + desiredRotation.x, 0.16);
-      trackedModel.rotation.y = THREE.MathUtils.lerp(trackedModel.rotation.y, baseRotation.y + desiredRotation.y, 0.16);
-      trackedModel.rotation.z = THREE.MathUtils.lerp(trackedModel.rotation.z, baseRotation.z + desiredRotation.z, 0.14);
+      trackedModel.rotation.x = THREE.MathUtils.lerp(trackedModel.rotation.x, baseRotation.x + desiredRotation.x, 0.24);
+      trackedModel.rotation.y = THREE.MathUtils.lerp(trackedModel.rotation.y, baseRotation.y + desiredRotation.y, 0.24);
+      trackedModel.rotation.z = THREE.MathUtils.lerp(trackedModel.rotation.z, baseRotation.z + desiredRotation.z, 0.20);
     }}
     controls.update();
     renderer.render(scene, camera);
