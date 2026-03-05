@@ -145,8 +145,15 @@ export function createRafaleViewer(config) {
   let lastHandTs = 0;
   let desiredHandRotation = { pitch: 0.0, yaw: 0.0, roll: 0.0 };
   let baseModelRotation = new THREE.Euler(0.0, 0.0, 0.0, "XYZ");
-  let lastGesture = "none";
-  let lastGestureTs = 0;
+  const interactionState = {
+    hasBaseline: false,
+    baselineAvgDepth: 0.0,
+    baselineHandGap: 0.0,
+    smoothedPitch: 0.0,
+    smoothedYaw: 0.0,
+    smoothedRoll: 0.0,
+    pausedByFist: false,
+  };
 
   function debugHierarchy(node, depth = 0) {
     if (!debug) return;
@@ -158,20 +165,84 @@ export function createRafaleViewer(config) {
     }
   }
 
-  function classifyGesture(lm) {
-    const isExtended = (tip, pip) => lm[tip].y < lm[pip].y;
-    const indexUp = isExtended(8, 6);
-    const middleUp = isExtended(12, 10);
-    const ringUp = isExtended(16, 14);
-    const pinkyUp = isExtended(20, 18);
-    const thumbOpen = lm[4].x > lm[3].x;
-    const extendedCount = [indexUp, middleUp, ringUp, pinkyUp, thumbOpen].filter(Boolean).length;
-    const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
-    if (pinchDist < 0.055) return { name: "pinch", pinchDist };
-    if (extendedCount <= 1) return { name: "fist", pinchDist };
-    if (indexUp && middleUp && !ringUp && !pinkyUp) return { name: "victory", pinchDist };
-    if (extendedCount >= 4) return { name: "open_palm", pinchDist };
-    return { name: "track", pinchDist };
+  // Thumb tip (4) + index tip (8) pinch detector.
+  function detectPinch(landmarks, threshold = 0.055) {
+    if (!landmarks || landmarks.length < 21) return false;
+    const dx = landmarks[4].x - landmarks[8].x;
+    const dy = landmarks[4].y - landmarks[8].y;
+    const dz = (landmarks[4].z || 0) - (landmarks[8].z || 0);
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    return dist < threshold;
+  }
+
+  // Closed fist detector: fingertips below their knuckle chain in image Y.
+  function detectFist(landmarks) {
+    if (!landmarks || landmarks.length < 21) return false;
+    const folded =
+      landmarks[8].y > landmarks[6].y &&
+      landmarks[12].y > landmarks[10].y &&
+      landmarks[16].y > landmarks[14].y &&
+      landmarks[20].y > landmarks[18].y;
+    const thumbFolded = landmarks[4].y > landmarks[3].y;
+    return folded && thumbFolded;
+  }
+
+  function detectOpenPalm(landmarks) {
+    if (!landmarks || landmarks.length < 21) return false;
+    return (
+      landmarks[8].y < landmarks[6].y &&
+      landmarks[12].y < landmarks[10].y &&
+      landmarks[16].y < landmarks[14].y &&
+      landmarks[20].y < landmarks[18].y
+    );
+  }
+
+  function palmCenter(landmarks) {
+    return landmarks[9];
+  }
+
+  // Two-hand "holding" model:
+  // - roll: line between palms in image plane
+  // - pitch: average palm depth shift (forward/back)
+  // - yaw: relative palm depth difference (left vs right hand)
+  function computeTwoHandRotation(leftHand, rightHand, state) {
+    const leftPalm = palmCenter(leftHand);
+    const rightPalm = palmCenter(rightHand);
+    const dx = rightPalm.x - leftPalm.x;
+    const dy = rightPalm.y - leftPalm.y;
+    const dz = (rightPalm.z || 0) - (leftPalm.z || 0);
+
+    const avgDepth = ((leftPalm.z || 0) + (rightPalm.z || 0)) * 0.5;
+    const gap = Math.hypot(dx, dy);
+
+    if (!state.hasBaseline) {
+      state.baselineAvgDepth = avgDepth;
+      state.baselineHandGap = gap;
+      state.hasBaseline = true;
+    }
+
+    const rawRoll = -Math.atan2(dy, Math.max(1e-6, dx)) * 0.95;
+    const rawPitch = (state.baselineAvgDepth - avgDepth) * 5.2;
+    const rawYaw = dz * 6.0;
+
+    const alpha = 0.18; // exponential smoothing
+    state.smoothedRoll += (rawRoll - state.smoothedRoll) * alpha;
+    state.smoothedPitch += (rawPitch - state.smoothedPitch) * alpha;
+    state.smoothedYaw += (rawYaw - state.smoothedYaw) * alpha;
+
+    return {
+      pitch: THREE.MathUtils.clamp(state.smoothedPitch, -0.78, 0.78),
+      yaw: THREE.MathUtils.clamp(state.smoothedYaw, -1.10, 1.10),
+      roll: THREE.MathUtils.clamp(state.smoothedRoll, -0.95, 0.95),
+      handGap: gap,
+    };
+  }
+
+  function updateAircraft(rotation, smooth = 0.16) {
+    if (!aircraft) return;
+    aircraft.rotation.x = THREE.MathUtils.lerp(aircraft.rotation.x, baseModelRotation.x + rotation.pitch, smooth);
+    aircraft.rotation.y = THREE.MathUtils.lerp(aircraft.rotation.y, baseModelRotation.y + rotation.yaw, smooth);
+    aircraft.rotation.z = THREE.MathUtils.lerp(aircraft.rotation.z, baseModelRotation.z + rotation.roll, smooth * 0.9);
   }
 
   async function initMediaPipeHandTracking() {
@@ -219,34 +290,56 @@ export function createRafaleViewer(config) {
     lastHandTs = now;
     const result = handLandmarker.detectForVideo(mpVideo, now);
     if (!result?.landmarks?.length) return;
-    const lm = result.landmarks[0];
-    const gesture = classifyGesture(lm);
 
-    const centerX = (lm[0].x + lm[5].x + lm[9].x + lm[13].x + lm[17].x) / 5.0;
-    const centerY = (lm[0].y + lm[5].y + lm[9].y + lm[13].y + lm[17].y) / 5.0;
-    const palmDx = lm[5].x - lm[17].x;
-    const palmDy = lm[5].y - lm[17].y;
-    desiredHandRotation.yaw = THREE.MathUtils.clamp((centerX - 0.5) * -2.4, -1.15, 1.15);
-    desiredHandRotation.pitch = THREE.MathUtils.clamp((0.5 - centerY) * 2.1, -0.75, 0.75);
-    desiredHandRotation.roll = THREE.MathUtils.clamp(Math.atan2(palmDy, palmDx) * 0.9, -0.85, 0.85);
+    const hands = result.landmarks;
+    const handedness = result.handednesses || [];
 
-    if (gesture.name === "pinch") {
-      const zoomFactor = THREE.MathUtils.clamp((gesture.pinchDist - 0.03) / 0.20, 0.0, 1.0);
-      const maxDistance = 26.0;
-      const minDistance = 4.5;
-      const targetDistance = maxDistance - zoomFactor * (maxDistance - minDistance);
-      const toCam = camera.position.clone().sub(controls.target).normalize();
-      camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(targetDistance)));
+    const leftIdx = handedness.findIndex((h) => (h[0]?.categoryName || "").toLowerCase() === "left");
+    const rightIdx = handedness.findIndex((h) => (h[0]?.categoryName || "").toLowerCase() === "right");
+    const leftHand = leftIdx >= 0 ? hands[leftIdx] : hands[0];
+    const rightHand = rightIdx >= 0 ? hands[rightIdx] : hands[Math.min(1, hands.length - 1)];
+
+    const fistDetected = hands.some((h) => detectFist(h));
+    if (fistDetected && !interactionState.pausedByFist) {
+      interactionState.pausedByFist = true;
+      trackingEl.textContent = "Hand tracking paused (fist)";
+      return;
     }
 
-    if (gesture.name !== lastGesture && now - lastGestureTs > 600) {
-      if (gesture.name === "victory") {
-        controls.autoRotate = !controls.autoRotate;
-      } else if (gesture.name === "open_palm") {
-        desiredHandRotation = { pitch: 0.0, yaw: 0.0, roll: 0.0 };
-      }
-      lastGesture = gesture.name;
-      lastGestureTs = now;
+    if (interactionState.pausedByFist) {
+      const openPalmSeen = hands.some((h) => detectOpenPalm(h));
+      if (!openPalmSeen) return;
+      interactionState.pausedByFist = false;
+      interactionState.hasBaseline = false;
+      trackingEl.textContent = "Hand tracking resumed (open palm)";
+    }
+
+    if (hands.length < 2) {
+      trackingEl.textContent = "Show both hands to hold aircraft";
+      return;
+    }
+
+    const rotation = computeTwoHandRotation(leftHand, rightHand, interactionState);
+    desiredHandRotation = rotation;
+    trackingEl.textContent = "Two-hand hold active";
+
+    // Pinch-to-zoom: both hands pinching, hand gap change controls camera distance.
+    const leftPinch = detectPinch(leftHand);
+    const rightPinch = detectPinch(rightHand);
+    if (leftPinch && rightPinch) {
+      const prevGap = interactionState.baselineHandGap || rotation.handGap;
+      const gapDelta = rotation.handGap - prevGap;
+      interactionState.baselineHandGap = rotation.handGap;
+
+      const toCam = camera.position.clone().sub(controls.target).normalize();
+      const currentDistance = camera.position.distanceTo(controls.target);
+      const nextDistance = THREE.MathUtils.clamp(
+        currentDistance - gapDelta * 28.0, // apart -> zoom in, closer -> zoom out
+        4.5,
+        26.0
+      );
+      camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(nextDistance)));
+      trackingEl.textContent = "Pinch zoom active";
     }
   }
 
@@ -559,10 +652,8 @@ export function createRafaleViewer(config) {
         ground.material.emissiveIntensity = 0.012 + 0.008 * Math.sin(t * 1.4);
       }
       updateMediaPipeHandTracking();
-      if (aircraft && handTrackingEnabled) {
-        aircraft.rotation.x = THREE.MathUtils.lerp(aircraft.rotation.x, baseModelRotation.x + desiredHandRotation.pitch, 0.16);
-        aircraft.rotation.y = THREE.MathUtils.lerp(aircraft.rotation.y, baseModelRotation.y + desiredHandRotation.yaw, 0.16);
-        aircraft.rotation.z = THREE.MathUtils.lerp(aircraft.rotation.z, baseModelRotation.z + desiredHandRotation.roll, 0.14);
+      if (aircraft && handTrackingEnabled && !interactionState.pausedByFist) {
+        updateAircraft(desiredHandRotation, 0.16);
       }
       controls.update();
       renderer.render(scene, camera);
@@ -607,6 +698,8 @@ export function createRafaleViewer(config) {
 
     const bounds = normalizeModel(aircraft);
     baseModelRotation = new THREE.Euler(aircraft.rotation.x, aircraft.rotation.y, aircraft.rotation.z, "XYZ");
+    interactionState.hasBaseline = false;
+    interactionState.pausedByFist = false;
     fitCameraToModel(bounds, false);
     collectEngineMeshes(aircraft, config.engineTokens || DEFAULT_ENGINE_TOKENS);
     applySkeletonView(aircraft, {

@@ -169,418 +169,66 @@ def _resolve_rafale_model_data_uri(uploaded_model) -> tuple[str | None, str | No
 
 
 def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: dict, enable_hand_tracking: bool) -> str:
-    if risk_level == "Critical":
-        engine_color = "#ff1a1a"
-        hull_tint = "#75625f"
-        status = "CRITICAL"
-    elif risk_level == "Warning":
-        engine_color = "#ff4d00"
-        hull_tint = "#8d8a80"
-        status = "WARNING"
-    else:
-        engine_color = "#00ff66"
-        hull_tint = "#a1a8a3"
-        status = "NOMINAL"
+    status = str(risk_level).upper()
+    viewer_module_path = Path("assets/rafale-viewer.js")
+    viewer_module_source = viewer_module_path.read_text(encoding="utf-8") if viewer_module_path.exists() else ""
 
-    html = """
+    return f"""
 <div id="rafale-wrap" style="width:100%;height:620px;position:relative;background:radial-gradient(circle at 20% 15%, #10161c, #05080b 55%);border:1px solid #00ff66;">
   <div style="position:absolute;top:10px;left:12px;color:#00ff66;font-family:Rajdhani,Segoe UI,sans-serif;letter-spacing:1px;z-index:10;">
-    DASSAULT RAFALE // 3D MODEL // STATUS: __STATUS__
+    DASSAULT RAFALE // 3D MODEL // STATUS: {status}
   </div>
-  <div id="rafale-progress" style="position:absolute;bottom:10px;left:12px;color:#8bd7a5;font-family:Rajdhani,Segoe UI,sans-serif;z-index:10;">
-    Loading 3D model...
+  <div id="rafale-module-status" style="position:absolute;bottom:10px;left:12px;color:#8bd7a5;font-family:Rajdhani,Segoe UI,sans-serif;z-index:10;">
+    Initializing viewer module...
   </div>
-  <div id="rafale-track-status" style="position:absolute;top:38px;left:12px;color:#8bd7a5;font-family:Rajdhani,Segoe UI,sans-serif;z-index:10;">
-    Hand tracking: standby
-  </div>
-  <canvas id="rafale-canvas" style="width:100%;height:100%;display:block;"></canvas>
+  <div id="rafale-viewer-root" style="position:absolute;inset:0;"></div>
 </div>
 
 <script type="module">
-import * as THREE from "https://esm.sh/three@0.162.0";
-import { OrbitControls } from "https://esm.sh/three@0.162.0/examples/jsm/controls/OrbitControls.js";
-import { GLTFLoader } from "https://esm.sh/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
-import { HandLandmarker, FilesetResolver } from "https://esm.sh/@mediapipe/tasks-vision@0.10.14";
+const statusEl = document.getElementById("rafale-module-status");
+const rootEl = document.getElementById("rafale-viewer-root");
+const moduleSource = {json.dumps(viewer_module_source)};
+const modelUrl = {json.dumps(model_data_uri)};
+const anomalyPayload = {json.dumps(anomaly_payload)};
+const handTrackingEnabled = {"true" if enable_hand_tracking else "false"};
 
-const canvas = document.getElementById("rafale-canvas");
-const wrap = document.getElementById("rafale-wrap");
-const progressEl = document.getElementById("rafale-progress");
-const trackingEl = document.getElementById("rafale-track-status");
-const modelUrl = "__MODEL_DATA_URI__";
-const engineColor = new THREE.Color("__ENGINE_COLOR__");
-const hullTint = new THREE.Color("__HULL_TINT__");
-const engineTokens = ["engine", "nozzle", "exhaust", "turbine", "afterburner"];
-const anomalyPayload = __ANOMALY_PAYLOAD__;
-const skeletonLineColor = new THREE.Color("#7fffb2");
-const skeletonSurfaceOpacity = 0.08;
-const anomalySurfaceOpacity = 0.62;
-const skeletonLineOpacity = 0.95;
-const skeletonEdgeAngle = 18;
-const handTrackingEnabled = __HAND_TRACKING__;
+if (!moduleSource) {{
+  statusEl.textContent = "Viewer module missing: assets/rafale-viewer.js";
+}} else {{
+  const moduleUrl = URL.createObjectURL(new Blob([moduleSource], {{ type: "text/javascript" }}));
+  try {{
+    const mod = await import(moduleUrl);
+    const viewer = mod.createRafaleViewer({{
+      container: rootEl,
+      modelUrl,
+      skeletonEnabled: true,
+      skeletonColor: "#7fffb2",
+      skeletonSurfaceOpacity: 0.08,
+      skeletonLineOpacity: 0.95,
+      enableHandTracking: handTrackingEnabled,
+      debug: true,
+    }});
 
-let trackedModel = null;
-let baselineRotation = new THREE.Euler(0.0, 0.0, 0.0, "XYZ");
-let mpVideo = null;
-let mpStream = null;
-let handLandmarker = null;
-let desiredRotation = { pitch: 0.0, yaw: 0.0, roll: 0.0 };
-let lastHandTs = 0;
-let lastGesture = "none";
-let lastGestureTs = 0;
-
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-renderer.setSize(Math.max(1, wrap.clientWidth), Math.max(1, wrap.clientHeight));
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.1;
-renderer.setClearColor(0x06090d, 1);
-
-const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x070b0f, 35, 120);
-const camera = new THREE.PerspectiveCamera(
-  42,
-  Math.max(1, wrap.clientWidth) / Math.max(1, wrap.clientHeight),
-  0.01,
-  1000
-);
-camera.position.set(10, 4, 10);
-
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.06;
-controls.enablePan = true;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 0.5;
-controls.target.set(0, 0, 0);
-
-scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-const key = new THREE.DirectionalLight(0xffffff, 1.15);
-key.position.set(16, 18, 12);
-scene.add(key);
-const fill = new THREE.DirectionalLight(0x88b8ff, 0.65);
-fill.position.set(-12, 8, -10);
-scene.add(fill);
-const rim = new THREE.DirectionalLight(0xaadfff, 0.45);
-rim.position.set(0, 6, -20);
-scene.add(rim);
-
-const deck = new THREE.Mesh(
-  new THREE.PlaneGeometry(400, 400),
-  new THREE.MeshStandardMaterial({ color: 0x0a0f14, roughness: 0.96, metalness: 0.02 })
-);
-deck.rotation.x = -Math.PI / 2;
-deck.position.y = -2.7;
-scene.add(deck);
-
-function fitCameraToBox(box) {
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-  const maxDim = Math.max(size.x, size.y, size.z, 0.001);
-  const fov = (camera.fov * Math.PI) / 180.0;
-  const distance = (maxDim * 0.5) / Math.tan(fov * 0.5);
-  const finalDistance = distance * 1.55;
-  const direction = new THREE.Vector3(1.0, 0.38, 1.0).normalize();
-  const newPos = center.clone().add(direction.multiplyScalar(finalDistance));
-
-  camera.near = Math.max(0.01, maxDim / 200.0);
-  camera.far = Math.max(200.0, maxDim * 250.0);
-  camera.updateProjectionMatrix();
-  camera.position.copy(newPos);
-  controls.target.copy(center);
-  controls.minDistance = maxDim * 0.2;
-  controls.maxDistance = maxDim * 20.0;
-  controls.update();
-}
-
-const loader = new GLTFLoader();
-loader.load(
-  modelUrl,
-  (gltf) => {
-    progressEl.textContent = "Model loaded";
-    const model = gltf.scene || (gltf.scenes && gltf.scenes[0]);
-    if (!model) {
-      progressEl.textContent = "Load failed: no scene in model";
-      console.error("GLTF loaded but no scene found.");
-      return;
-    }
-
-    let highlightedCount = 0;
-    const anomalyLabels = [];
-    const anomalyRegions = (anomalyPayload && anomalyPayload.regions) ? anomalyPayload.regions : [];
-    const regionColor = new THREE.Color("#ff1a1a");
-
-    function meshMatchesRegion(meshName, region) {
-      const tokens = Array.isArray(region.tokens) ? region.tokens : [];
-      return tokens.some((token) => meshName.includes(String(token).toLowerCase()));
-    }
-
-    console.group("Rafale hierarchy");
-    model.traverse((node) => {
-      console.log(node.type, node.name || "(unnamed)");
-      if (!node.isMesh) return;
-      const cloneMat = node.material && node.material.clone ? node.material.clone() : new THREE.MeshStandardMaterial();
-      node.material = cloneMat;
-      node.castShadow = true;
-      node.receiveShadow = true;
-      if (node.material.color) node.material.color.lerp(hullTint, 0.22);
-      if (typeof node.material.metalness === "number") node.material.metalness = Math.max(node.material.metalness, 0.35);
-      if (typeof node.material.roughness === "number") node.material.roughness = Math.min(node.material.roughness, 0.62);
-      node.material.transparent = true;
-      node.material.opacity = skeletonSurfaceOpacity;
-      node.material.depthWrite = false;
-      node.material.side = THREE.DoubleSide;
-
-      const meshName = (node.name || "").toLowerCase();
-      if (engineTokens.some((token) => meshName.includes(token))) {
-        if (!node.material.emissive) node.material.emissive = engineColor.clone();
-        node.material.emissive.copy(engineColor);
-        node.material.emissiveIntensity = 0.9;
-        if (node.material.color) node.material.color.lerp(engineColor, 0.35);
-      }
-
-      for (const region of anomalyRegions) {
-        if (!meshMatchesRegion(meshName, region)) continue;
-        if (!node.material.emissive) node.material.emissive = regionColor.clone();
-        node.material.emissive.copy(regionColor);
-        node.material.emissiveIntensity = 1.15;
-        if (node.material.color) node.material.color.lerp(regionColor, 0.55);
-        node.material.opacity = anomalySurfaceOpacity;
-        node.material.depthWrite = true;
-        highlightedCount += 1;
-        if (region.label) anomalyLabels.push(region.label);
-        break;
-      }
-
-      const edgeColor = node.material.opacity >= anomalySurfaceOpacity ? regionColor : skeletonLineColor;
-      const edges = new THREE.EdgesGeometry(node.geometry, skeletonEdgeAngle);
-      const edgeMat = new THREE.LineBasicMaterial({
-        color: edgeColor,
-        transparent: true,
-        opacity: node.material.opacity >= anomalySurfaceOpacity ? 1.0 : skeletonLineOpacity
-      });
-      const edgeLines = new THREE.LineSegments(edges, edgeMat);
-      edgeLines.renderOrder = 2;
-      node.add(edgeLines);
-    });
-    console.groupEnd();
-
-    // Normalize and center model.
-    const box = new THREE.Box3().setFromObject(model);
-    const size = box.getSize(new THREE.Vector3());
-    const center = box.getCenter(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
-    const targetSpan = 8.0;
-    const scale = targetSpan / maxDim;
-    model.scale.setScalar(scale);
-
-    const scaledBox = new THREE.Box3().setFromObject(model);
-    const scaledCenter = scaledBox.getCenter(new THREE.Vector3());
-    model.position.sub(scaledCenter);
-
-    const centeredBox = new THREE.Box3().setFromObject(model);
-    const centeredSize = centeredBox.getSize(new THREE.Vector3());
-    const centeredMinY = centeredBox.min.y;
-    model.position.y += -centeredMinY + centeredSize.y * 0.03;
-
-    trackedModel = model;
-    baselineRotation = new THREE.Euler(model.rotation.x, model.rotation.y, model.rotation.z, "XYZ");
-    scene.add(model);
-    fitCameraToBox(new THREE.Box3().setFromObject(model));
-
-    if (highlightedCount > 0) {
-      const uniq = [...new Set(anomalyLabels)];
-      progressEl.textContent = "Anomaly regions highlighted: " + uniq.join(", ");
-    }
-
-    progressEl.style.transition = "opacity 350ms ease";
-    setTimeout(() => { progressEl.style.opacity = "0.0"; }, 800);
-  },
-  (evt) => {
-    if (evt.total) {
-      progressEl.textContent = "Loading 3D model... " + Math.round((evt.loaded / evt.total) * 100) + "%";
-    } else {
-      progressEl.textContent = "Loading 3D model... " + Math.round(evt.loaded / 1024) + " KB";
-    }
-  },
-  (err) => {
-    console.error("Failed to load GLB/GLTF model:", err);
-    progressEl.textContent = "Load error: check browser console";
-    const fallback = new THREE.Mesh(
-      new THREE.ConeGeometry(0.9, 3.8, 36),
-      new THREE.MeshStandardMaterial({ color: 0x7b8e9d, metalness: 0.6, roughness: 0.4 })
-    );
-    fallback.rotation.z = -Math.PI / 2;
-    scene.add(fallback);
-    fitCameraToBox(new THREE.Box3().setFromObject(fallback));
-  }
-);
-
-async function initHandTracking() {
-  if (!handTrackingEnabled) {
-    trackingEl.textContent = "Hand tracking: off";
-    return;
-  }
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    trackingEl.textContent = "Hand tracking unavailable (no camera API)";
-    return;
-  }
-
-  try {
-    trackingEl.textContent = "Hand tracking: loading MediaPipe...";
-    const vision = await FilesetResolver.forVisionTasks(
-      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-    );
-    handLandmarker = await HandLandmarker.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath:
-          "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
-      },
-      runningMode: "VIDEO",
-      numHands: 1,
-    });
-
-    mpVideo = document.createElement("video");
-    mpVideo.autoplay = true;
-    mpVideo.muted = true;
-    mpVideo.playsInline = true;
-    mpVideo.style.display = "none";
-    wrap.appendChild(mpVideo);
-
-    mpStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
-      audio: false,
-    });
-    mpVideo.srcObject = mpStream;
-    await mpVideo.play();
-    trackingEl.textContent = "Hand tracking: active (gesture mode)";
-  } catch (err) {
-    console.error("MediaPipe hand tracking init failed:", err);
-    trackingEl.textContent = "Hand tracking blocked/unavailable";
-  }
-}
-
-function classifyGesture(lm) {
-  const isExtended = (tip, pip) => lm[tip].y < lm[pip].y;
-  const indexUp = isExtended(8, 6);
-  const middleUp = isExtended(12, 10);
-  const ringUp = isExtended(16, 14);
-  const pinkyUp = isExtended(20, 18);
-  const thumbOpen = lm[4].x > lm[3].x;
-  const extendedCount = [indexUp, middleUp, ringUp, pinkyUp, thumbOpen].filter(Boolean).length;
-  const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
-
-  if (pinchDist < 0.055) return { name: "pinch", pinchDist };
-  if (extendedCount <= 1) return { name: "fist", pinchDist };
-  if (indexUp && middleUp && !ringUp && !pinkyUp) return { name: "victory", pinchDist };
-  if (extendedCount >= 4) return { name: "open_palm", pinchDist };
-  return { name: "track", pinchDist };
-}
-
-function applyGesture(gesture, lm, now) {
-  const centerX = (lm[0].x + lm[5].x + lm[9].x + lm[13].x + lm[17].x) / 5.0;
-  const centerY = (lm[0].y + lm[5].y + lm[9].y + lm[13].y + lm[17].y) / 5.0;
-  const palmDx = lm[5].x - lm[17].x;
-  const palmDy = lm[5].y - lm[17].y;
-
-  desiredRotation.yaw = THREE.MathUtils.clamp((centerX - 0.5) * -2.4, -1.15, 1.15);
-  desiredRotation.pitch = THREE.MathUtils.clamp((0.5 - centerY) * 2.1, -0.75, 0.75);
-  desiredRotation.roll = THREE.MathUtils.clamp(Math.atan2(palmDy, palmDx) * 0.9, -0.85, 0.85);
-
-  if (gesture.name === "pinch") {
-    const zoomFactor = THREE.MathUtils.clamp((gesture.pinchDist - 0.03) / 0.20, 0.0, 1.0);
-    const maxDistance = 26.0;
-    const minDistance = 4.5;
-    const targetDistance = maxDistance - zoomFactor * (maxDistance - minDistance);
-    const toCam = camera.position.clone().sub(controls.target).normalize();
-    camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(targetDistance)));
-  }
-
-  if (gesture.name !== lastGesture && now - lastGestureTs > 600) {
-    if (gesture.name === "victory") {
-      controls.autoRotate = !controls.autoRotate;
-      trackingEl.textContent = controls.autoRotate
-        ? "Hand tracking: active (auto-rotate on)"
-        : "Hand tracking: active (auto-rotate off)";
-    } else if (gesture.name === "open_palm") {
-      desiredRotation = { pitch: 0.0, yaw: 0.0, roll: 0.0 };
-      trackingEl.textContent = "Hand tracking: reset orientation";
-    }
-    lastGesture = gesture.name;
-    lastGestureTs = now;
-  }
-
-  if (gesture.name === "fist") {
-    trackingEl.textContent = "Hand tracking: fist hold";
-  } else if (gesture.name === "pinch") {
-    trackingEl.textContent = "Hand tracking: pinch zoom";
-  }
-}
-
-function updateHandTracking() {
-  if (!handTrackingEnabled || !handLandmarker || !mpVideo || mpVideo.readyState < 2) return;
-  const now = performance.now();
-  if (now - lastHandTs < 33) return;
-  lastHandTs = now;
-
-  const result = handLandmarker.detectForVideo(mpVideo, now);
-  if (!result || !result.landmarks || result.landmarks.length === 0) return;
-  const lm = result.landmarks[0];
-  if (!lm || lm.length < 21) return;
-
-  const gesture = classifyGesture(lm);
-  applyGesture(gesture, lm, now);
-}
-
-const onResize = () => {
-  const w = Math.max(1, wrap.clientWidth);
-  const h = Math.max(1, wrap.clientHeight);
-  renderer.setSize(w, h);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-};
-window.addEventListener("resize", onResize);
-
-const clock = new THREE.Clock();
-const animate = () => {
-  const t = clock.getElapsedTime();
-  deck.material.emissive = new THREE.Color(0x00ff66);
-  deck.material.emissiveIntensity = 0.012 + 0.008 * Math.sin(t * 1.4);
-
-  updateHandTracking();
-  if (trackedModel && handTrackingEnabled) {
-    trackedModel.rotation.x = THREE.MathUtils.lerp(
-      trackedModel.rotation.x,
-      baselineRotation.x + desiredRotation.pitch,
-      0.16
-    );
-    trackedModel.rotation.y = THREE.MathUtils.lerp(
-      trackedModel.rotation.y,
-      baselineRotation.y + desiredRotation.yaw,
-      0.16
-    );
-    trackedModel.rotation.z = THREE.MathUtils.lerp(
-      trackedModel.rotation.z,
-      baselineRotation.z + desiredRotation.roll,
-      0.14
-    );
-  }
-  controls.update();
-  renderer.render(scene, camera);
-  requestAnimationFrame(animate);
-};
-animate();
-initHandTracking();
+    await viewer.load();
+    const regions = (anomalyPayload && anomalyPayload.regions) ? anomalyPayload.regions : [];
+    if (regions.length > 0) {{
+      viewer.highlightAnomalyRegions(regions, {{
+        color: "#ff1a1a",
+        intensity: 1.15,
+        surfaceOpacity: 0.62,
+      }});
+    }}
+    statusEl.style.opacity = "0";
+    statusEl.style.transition = "opacity 300ms ease";
+  }} catch (err) {{
+    console.error("Failed to initialize rafale-viewer.js:", err);
+    statusEl.textContent = "Viewer module error: check browser console";
+  }} finally {{
+    URL.revokeObjectURL(moduleUrl);
+  }}
+}}
 </script>
 """
-    return (
-    html.replace("__MODEL_DATA_URI__", model_data_uri)
-        .replace("__ENGINE_COLOR__", engine_color)
-        .replace("__HULL_TINT__", hull_tint)
-        .replace("__ANOMALY_PAYLOAD__", json.dumps(anomaly_payload))
-        .replace("__HAND_TRACKING__", "true" if enable_hand_tracking else "false")
-        .replace("__STATUS__", status)
-    )
 
 
 def _anomaly_regions(latest: pd.Series) -> dict:
