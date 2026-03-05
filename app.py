@@ -9,6 +9,8 @@ from pathlib import Path
 from engine import EngineStateModel
 from stream_processor import StreamingTelemetryProcessor, normalize_telemetry_frame
 
+APP_DIR = Path(__file__).resolve().parent
+
 
 def _build_live_features(df: pd.DataFrame, anomaly_threshold: float) -> pd.DataFrame:
     telemetry = df.copy().sort_values("time").reset_index(drop=True)
@@ -150,12 +152,12 @@ def _resolve_rafale_model_data_uri(uploaded_model) -> tuple[str | None, str | No
         return f"data:{mime};base64,{encoded}", model_name
 
     local_candidates = [
-        Path("assets/rafale.glb"),
-        Path("assets/rafale.gltf"),
-        Path("models/rafale.glb"),
-        Path("models/rafale.gltf"),
-        Path("rafale.glb"),
-        Path("rafale.gltf"),
+        APP_DIR / "assets" / "rafale.glb",
+        APP_DIR / "assets" / "rafale.gltf",
+        APP_DIR / "models" / "rafale.glb",
+        APP_DIR / "models" / "rafale.gltf",
+        APP_DIR / "rafale.glb",
+        APP_DIR / "rafale.gltf",
     ]
     for candidate in local_candidates:
         if candidate.exists() and candidate.is_file():
@@ -163,14 +165,14 @@ def _resolve_rafale_model_data_uri(uploaded_model) -> tuple[str | None, str | No
             ext = candidate.suffix.lower()
             mime = "model/gltf-binary" if ext == ".glb" else "model/gltf+json"
             encoded = base64.b64encode(model_bytes).decode("ascii")
-            return f"data:{mime};base64,{encoded}", str(candidate)
+            return f"data:{mime};base64,{encoded}", str(candidate.relative_to(APP_DIR))
 
     return None, None
 
 
 def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: dict, enable_hand_tracking: bool) -> str:
     status = str(risk_level).upper()
-    viewer_module_path = Path("assets/rafale-viewer.js")
+    viewer_module_path = APP_DIR / "assets" / "rafale-viewer.js"
     viewer_module_source = viewer_module_path.read_text(encoding="utf-8") if viewer_module_path.exists() else ""
 
     return f"""
