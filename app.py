@@ -194,8 +194,72 @@ const modelUrl = {json.dumps(model_data_uri)};
 const anomalyPayload = {json.dumps(anomaly_payload)};
 const handTrackingEnabled = {"true" if enable_hand_tracking else "false"};
 
+async function runFallbackViewer(reason) {{
+  statusEl.textContent = "Fallback viewer: " + reason;
+  try {{
+    const THREE = await import("https://esm.sh/three@0.162.0");
+    const {{ OrbitControls }} = await import("https://esm.sh/three@0.162.0/examples/jsm/controls/OrbitControls.js");
+    const {{ GLTFLoader }} = await import("https://esm.sh/three@0.162.0/examples/jsm/loaders/GLTFLoader.js");
+
+    rootEl.innerHTML = "";
+    const renderer = new THREE.WebGLRenderer({{ antialias: true, alpha: false }});
+    renderer.setSize(rootEl.clientWidth || 1024, rootEl.clientHeight || 620);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(0x06090d, 1);
+    rootEl.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(42, (rootEl.clientWidth || 1024) / (rootEl.clientHeight || 620), 0.01, 1000);
+    camera.position.set(10, 4, 10);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.5;
+    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    const key = new THREE.DirectionalLight(0xffffff, 1.1);
+    key.position.set(12, 14, 10);
+    scene.add(key);
+
+    const loader = new GLTFLoader();
+    loader.load(
+      modelUrl,
+      (gltf) => {{
+        const model = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+        if (!model) throw new Error("no-scene");
+        scene.add(model);
+        const box = new THREE.Box3().setFromObject(model);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
+        model.scale.setScalar(8.0 / maxDim);
+        const sbox = new THREE.Box3().setFromObject(model);
+        model.position.sub(sbox.getCenter(new THREE.Vector3()));
+        controls.target.set(0, 0, 0);
+        statusEl.textContent = "Fallback viewer loaded";
+        statusEl.style.opacity = "0";
+        statusEl.style.transition = "opacity 300ms ease";
+      }},
+      undefined,
+      (err) => {{
+        console.error("Fallback GLTF load failed:", err);
+        statusEl.textContent = "Model load failed in fallback viewer";
+      }}
+    );
+
+    const animate = () => {{
+      controls.update();
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }};
+    animate();
+  }} catch (fallbackErr) {{
+    console.error("Fallback viewer init failed:", fallbackErr);
+    statusEl.textContent = "Viewer failed: check browser console";
+  }}
+}}
+
 if (!moduleSource) {{
-  statusEl.textContent = "Viewer module missing: assets/rafale-viewer.js";
+  runFallbackViewer("module missing");
 }} else {{
   const moduleUrl = URL.createObjectURL(new Blob([moduleSource], {{ type: "text/javascript" }}));
   try {{
@@ -203,7 +267,7 @@ if (!moduleSource) {{
     const viewer = mod.createRafaleViewer({{
       container: rootEl,
       modelUrl,
-      skeletonEnabled: true,
+      skeletonEnabled: false,
       skeletonColor: "#7fffb2",
       skeletonSurfaceOpacity: 0.08,
       skeletonLineOpacity: 0.95,
@@ -224,7 +288,7 @@ if (!moduleSource) {{
     statusEl.style.transition = "opacity 300ms ease";
   }} catch (err) {{
     console.error("Failed to initialize rafale-viewer.js:", err);
-    statusEl.textContent = "Viewer module error: check browser console";
+    await runFallbackViewer("module error");
   }} finally {{
     URL.revokeObjectURL(moduleUrl);
   }}
