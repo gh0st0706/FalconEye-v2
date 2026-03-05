@@ -20,26 +20,12 @@
     await viewer.load();
 */
 
-import * as THREE from "https://unpkg.com/three@0.162.0/build/three.module.js";
-import { OrbitControls } from "https://unpkg.com/three@0.162.0/examples/jsm/controls/OrbitControls.js";
-import { GLTFLoader } from "https://unpkg.com/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
+import * as THREE from "https://esm.sh/three@0.162.0";
+import { OrbitControls } from "https://esm.sh/three@0.162.0/examples/jsm/controls/OrbitControls.js";
+import { GLTFLoader } from "https://esm.sh/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
 
 const DEFAULT_ENGINE_TOKENS = ["engine", "nozzle", "turbine", "exhaust", "afterburner"];
-loader.load(
-  "rafale.glb",
-  function (gltf) {
 
-    console.log("MODEL LOADED");
-    console.log(gltf);
-
-    scene.add(gltf.scene);
-
-  },
-  undefined,
-  function (error) {
-    console.error("MODEL FAILED", error);
-  }
-);
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
@@ -141,6 +127,8 @@ export function createRafaleViewer(config) {
   let animationFrame = null;
   const materialBackup = new WeakMap();
   const engineMeshes = [];
+  const edgeOverlays = [];
+  let skeletonEnabled = config.skeletonEnabled ?? true;
 
   function debugHierarchy(node, depth = 0) {
     if (!debug) return;
@@ -240,6 +228,9 @@ export function createRafaleViewer(config) {
       emissive: mesh.material.emissive ? mesh.material.emissive.clone() : null,
       emissiveIntensity:
         typeof mesh.material.emissiveIntensity === "number" ? mesh.material.emissiveIntensity : null,
+      opacity: typeof mesh.material.opacity === "number" ? mesh.material.opacity : 1.0,
+      transparent: !!mesh.material.transparent,
+      depthWrite: typeof mesh.material.depthWrite === "boolean" ? mesh.material.depthWrite : true,
     });
   }
 
@@ -249,6 +240,48 @@ export function createRafaleViewer(config) {
     if (backup.color && mesh.material.color) mesh.material.color.copy(backup.color);
     if (backup.emissive && mesh.material.emissive) mesh.material.emissive.copy(backup.emissive);
     if (backup.emissiveIntensity != null) mesh.material.emissiveIntensity = backup.emissiveIntensity;
+    mesh.material.opacity = backup.opacity;
+    mesh.material.transparent = backup.transparent;
+    mesh.material.depthWrite = backup.depthWrite;
+    mesh.material.needsUpdate = true;
+  }
+
+  function clearEdgeOverlays() {
+    for (const edge of edgeOverlays) {
+      if (edge.parent) edge.parent.remove(edge);
+      if (edge.geometry) edge.geometry.dispose();
+      if (edge.material) edge.material.dispose();
+    }
+    edgeOverlays.length = 0;
+  }
+
+  function applySkeletonView(
+    model,
+    { enabled = true, lineColor = "#7fffb2", lineOpacity = 0.95, surfaceOpacity = 0.08, thresholdAngle = 18 } = {}
+  ) {
+    clearEdgeOverlays();
+    model.traverse((obj) => {
+      if (!obj.isMesh || !obj.geometry || !obj.material) return;
+      backupMaterial(obj);
+      obj.material.transparent = enabled;
+      obj.material.opacity = enabled ? surfaceOpacity : 1.0;
+      obj.material.depthWrite = !enabled;
+      obj.material.side = THREE.DoubleSide;
+      obj.material.needsUpdate = true;
+
+      if (!enabled) return;
+      const edges = new THREE.EdgesGeometry(obj.geometry, thresholdAngle);
+      const edgeMat = new THREE.LineBasicMaterial({
+        color: new THREE.Color(lineColor),
+        transparent: true,
+        opacity: lineOpacity,
+      });
+      const edgeLines = new THREE.LineSegments(edges, edgeMat);
+      edgeLines.name = `edge-${obj.name || "mesh"}`;
+      edgeLines.renderOrder = 2;
+      obj.add(edgeLines);
+      edgeOverlays.push(edgeLines);
+    });
   }
 
   function setAnomalyState(state = "normal") {
@@ -372,6 +405,13 @@ export function createRafaleViewer(config) {
     const bounds = normalizeModel(aircraft);
     fitCameraToModel(bounds, false);
     collectEngineMeshes(aircraft, config.engineTokens || DEFAULT_ENGINE_TOKENS);
+    applySkeletonView(aircraft, {
+      enabled: skeletonEnabled,
+      lineColor: config.skeletonColor || "#7fffb2",
+      lineOpacity: config.skeletonLineOpacity ?? 0.95,
+      surfaceOpacity: config.skeletonSurfaceOpacity ?? 0.08,
+      thresholdAngle: config.skeletonThresholdAngle ?? 18,
+    });
 
     progressEl.textContent = "Model loaded";
     setTimeout(() => {
@@ -386,6 +426,7 @@ export function createRafaleViewer(config) {
   function dispose() {
     if (animationFrame) cancelAnimationFrame(animationFrame);
     animationFrame = null;
+    clearEdgeOverlays();
     window.removeEventListener("resize", onResize);
     controls.dispose();
     renderer.dispose();
@@ -403,6 +444,21 @@ export function createRafaleViewer(config) {
     setAnomalyState,
     clearAnomalyHighlight,
     highlightParts,
+    setSkeletonMode: (enabled = true, options = {}) => {
+      skeletonEnabled = !!enabled;
+      if (!aircraft) return;
+      if (!skeletonEnabled) {
+        applySkeletonView(aircraft, { enabled: false });
+        return;
+      }
+      applySkeletonView(aircraft, {
+        enabled: true,
+        lineColor: options.lineColor || config.skeletonColor || "#7fffb2",
+        lineOpacity: options.lineOpacity ?? config.skeletonLineOpacity ?? 0.95,
+        surfaceOpacity: options.surfaceOpacity ?? config.skeletonSurfaceOpacity ?? 0.08,
+        thresholdAngle: options.thresholdAngle ?? config.skeletonThresholdAngle ?? 18,
+      });
+    },
     setTelemetryOrientation,
     fitCamera: () => {
       if (!aircraft) return;

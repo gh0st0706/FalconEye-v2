@@ -204,6 +204,10 @@ const modelUrl = "__MODEL_DATA_URI__";
 const engineColor = new THREE.Color("__ENGINE_COLOR__");
 const hullTint = new THREE.Color("__HULL_TINT__");
 const engineTokens = ["engine", "nozzle", "exhaust", "turbine", "afterburner"];
+const skeletonLineColor = new THREE.Color("#7fffb2");
+const skeletonSurfaceOpacity = 0.08;
+const skeletonLineOpacity = 0.95;
+const skeletonEdgeAngle = 18;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -293,6 +297,10 @@ loader.load(
       if (node.material.color) node.material.color.lerp(hullTint, 0.22);
       if (typeof node.material.metalness === "number") node.material.metalness = Math.max(node.material.metalness, 0.35);
       if (typeof node.material.roughness === "number") node.material.roughness = Math.min(node.material.roughness, 0.62);
+      node.material.transparent = true;
+      node.material.opacity = skeletonSurfaceOpacity;
+      node.material.depthWrite = false;
+      node.material.side = THREE.DoubleSide;
 
       const meshName = (node.name || "").toLowerCase();
       if (engineTokens.some((token) => meshName.includes(token))) {
@@ -301,6 +309,16 @@ loader.load(
         node.material.emissiveIntensity = 0.9;
         if (node.material.color) node.material.color.lerp(engineColor, 0.35);
       }
+
+      const edges = new THREE.EdgesGeometry(node.geometry, skeletonEdgeAngle);
+      const edgeMat = new THREE.LineBasicMaterial({
+        color: skeletonLineColor,
+        transparent: true,
+        opacity: skeletonLineOpacity
+      });
+      const edgeLines = new THREE.LineSegments(edges, edgeMat);
+      edgeLines.renderOrder = 2;
+      node.add(edgeLines);
     });
     console.groupEnd();
 
