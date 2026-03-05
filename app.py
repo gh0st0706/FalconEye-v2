@@ -140,105 +140,168 @@ def _aircraft_3d_figure(latest: pd.Series) -> go.Figure:
     colors = _fault_color_map(str(latest["risk_level"]))
     fig = go.Figure()
 
-    # Fuselage
-    fuselage_x = np.linspace(-3.5, 3.5, 60)
-    fuselage_y = np.zeros_like(fuselage_x)
-    fuselage_z = 0.02 * np.sin(np.linspace(0.0, 2.0 * np.pi, fuselage_x.size))
+    def _mono_surface(x_vals, y_vals, z_vals, color, name, opacity=1.0):
+        fig.add_trace(
+            go.Surface(
+                x=x_vals,
+                y=y_vals,
+                z=z_vals,
+                surfacecolor=np.zeros_like(x_vals),
+                colorscale=[[0, color], [1, color]],
+                showscale=False,
+                opacity=opacity,
+                name=name,
+                hovertemplate=f"{name}<extra></extra>",
+                lighting=dict(ambient=0.35, diffuse=0.95, specular=0.55, roughness=0.45, fresnel=0.25),
+                lightposition=dict(x=120, y=70, z=160),
+            )
+        )
+
+    # Fuselage body (axisymmetric profile)
+    theta = np.linspace(0.0, 2.0 * np.pi, 56)
+    x_fus = np.linspace(-4.0, 4.0, 150)
+    radius_profile = np.interp(
+        x_fus,
+        [-4.0, -3.3, -2.0, 0.5, 2.3, 3.3, 4.0],
+        [0.03, 0.42, 0.56, 0.58, 0.42, 0.22, 0.01],
+    )
+    fus_x = np.tile(x_fus[:, None], (1, theta.size))
+    fus_y = radius_profile[:, None] * np.cos(theta)[None, :]
+    fus_z = radius_profile[:, None] * np.sin(theta)[None, :]
+    _mono_surface(fus_x, fus_y, fus_z, colors["fuselage"], "Fuselage")
+
+    # Bubble canopy
+    canopy_x = np.linspace(0.8, 1.9, 46)
+    canopy_y = np.linspace(-0.32, 0.32, 34)
+    cx, cy = np.meshgrid(canopy_x, canopy_y)
+    canopy_shape = 1.0 - ((cx - 1.35) / 0.55) ** 2 - (cy / 0.28) ** 2
+    cz = 0.10 + 0.42 * np.sqrt(np.clip(canopy_shape, 0.0, None))
+    cz[canopy_shape < 0.0] = np.nan
+    _mono_surface(cx, cy, cz, colors["canopy"], "Canopy", opacity=0.92)
+
+    # Engine nacelles (fault-colored)
+    engine_theta = np.linspace(0.0, 2.0 * np.pi, 36)
+    engine_x = np.linspace(-2.6, -0.6, 60)
+    ex = np.tile(engine_x[:, None], (1, engine_theta.size))
+    for side, label in [(-0.58, "Left Engine"), (0.58, "Right Engine")]:
+        ey = side + 0.18 * np.cos(engine_theta)[None, :]
+        ez = -0.28 + 0.16 * np.sin(engine_theta)[None, :]
+        _mono_surface(ex, np.tile(ey, (engine_x.size, 1)), np.tile(ez, (engine_x.size, 1)), colors["engines"], label)
+
+    # Wing meshes (top + bottom + edges)
+    def _wing_mesh(side: float, name: str):
+        top = np.array(
+            [
+                [0.35, 0.42 * side, 0.03],
+                [-1.05, 0.50 * side, 0.03],
+                [-2.35, 3.05 * side, 0.03],
+                [-0.25, 2.50 * side, 0.03],
+            ]
+        )
+        bottom = top.copy()
+        bottom[:, 2] = -0.03
+        verts = np.vstack([top, bottom])
+        i = [0, 0, 4, 4, 0, 1, 1, 2, 2, 3, 3, 0]
+        j = [1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 0, 4]
+        k = [2, 3, 6, 7, 5, 2, 6, 3, 7, 0, 4, 7]
+        fig.add_trace(
+            go.Mesh3d(
+                x=verts[:, 0],
+                y=verts[:, 1],
+                z=verts[:, 2],
+                i=i,
+                j=j,
+                k=k,
+                color=colors["wings"],
+                opacity=0.98,
+                name=name,
+                hovertemplate=f"{name}<extra></extra>",
+                lighting=dict(ambient=0.35, diffuse=0.95, specular=0.5, roughness=0.5),
+                lightposition=dict(x=120, y=70, z=160),
+            )
+        )
+
+    _wing_mesh(1.0, "Right Wing")
+    _wing_mesh(-1.0, "Left Wing")
+
+    # Horizontal stabilizers
+    def _stabilizer_mesh(side: float, name: str):
+        top = np.array(
+            [
+                [-2.85, 0.28 * side, 0.18],
+                [-3.55, 0.30 * side, 0.18],
+                [-3.95, 1.25 * side, 0.18],
+                [-2.95, 1.10 * side, 0.18],
+            ]
+        )
+        bottom = top.copy()
+        bottom[:, 2] = 0.12
+        verts = np.vstack([top, bottom])
+        i = [0, 0, 4, 4, 0, 1, 1, 2, 2, 3, 3, 0]
+        j = [1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 0, 4]
+        k = [2, 3, 6, 7, 5, 2, 6, 3, 7, 0, 4, 7]
+        fig.add_trace(
+            go.Mesh3d(
+                x=verts[:, 0],
+                y=verts[:, 1],
+                z=verts[:, 2],
+                i=i,
+                j=j,
+                k=k,
+                color=colors["wings"],
+                opacity=0.98,
+                name=name,
+                hovertemplate=f"{name}<extra></extra>",
+                lighting=dict(ambient=0.35, diffuse=0.95, specular=0.5, roughness=0.5),
+                lightposition=dict(x=120, y=70, z=160),
+            )
+        )
+
+    _stabilizer_mesh(1.0, "Right Stabilizer")
+    _stabilizer_mesh(-1.0, "Left Stabilizer")
+
+    # Vertical tail
+    vert = np.array(
+        [
+            [-3.05, 0.0, 0.18],
+            [-3.95, 0.0, 0.25],
+            [-3.45, 0.0, 1.25],
+            [-2.95, 0.0, 1.05],
+            [-3.05, 0.06, 0.18],
+            [-3.95, 0.06, 0.25],
+            [-3.45, 0.06, 1.25],
+            [-2.95, 0.06, 1.05],
+        ]
+    )
     fig.add_trace(
-        go.Scatter3d(
-            x=fuselage_x,
-            y=fuselage_y,
-            z=fuselage_z,
-            mode="lines",
-            line=dict(color=colors["fuselage"], width=16),
-            name="Fuselage",
-            hovertemplate="Aircraft body<extra></extra>",
+        go.Mesh3d(
+            x=vert[:, 0],
+            y=vert[:, 1],
+            z=vert[:, 2],
+            i=[0, 0, 4, 4, 0, 1, 1, 2, 2, 3, 3, 0],
+            j=[1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 0, 4],
+            k=[2, 3, 6, 7, 5, 2, 6, 3, 7, 0, 4, 7],
+            color=colors["wings"],
+            opacity=0.98,
+            name="Vertical Tail",
+            hovertemplate="Vertical Tail<extra></extra>",
+            lighting=dict(ambient=0.35, diffuse=0.95, specular=0.5, roughness=0.5),
+            lightposition=dict(x=120, y=70, z=160),
         )
     )
 
-    # Wings
-    wing_y = np.linspace(-2.6, 2.6, 40)
-    wing_x = np.full_like(wing_y, -0.2)
-    wing_z = np.zeros_like(wing_y)
+    # Engine status markers (explicit fault signal)
     fig.add_trace(
         go.Scatter3d(
-            x=wing_x,
-            y=wing_y,
-            z=wing_z,
-            mode="lines",
-            line=dict(color=colors["wings"], width=12),
-            name="Wings",
-            hovertemplate="Wings<extra></extra>",
-        )
-    )
-
-    # Tailplane
-    tail_y = np.linspace(-1.3, 1.3, 20)
-    tail_x = np.full_like(tail_y, -2.6)
-    tail_z = np.full_like(tail_y, 0.5)
-    fig.add_trace(
-        go.Scatter3d(
-            x=tail_x,
-            y=tail_y,
-            z=tail_z,
-            mode="lines",
-            line=dict(color=colors["wings"], width=8),
-            name="Tail",
-            hovertemplate="Tail surface<extra></extra>",
-        )
-    )
-
-    # Vertical stabilizer
-    fig.add_trace(
-        go.Scatter3d(
-            x=[-2.7, -2.7],
-            y=[0.0, 0.0],
-            z=[0.0, 1.2],
-            mode="lines",
-            line=dict(color=colors["wings"], width=10),
-            name="Stabilizer",
-            hovertemplate="Vertical stabilizer<extra></extra>",
-        )
-    )
-
-    # Canopy
-    fig.add_trace(
-        go.Scatter3d(
-            x=[1.0, 1.2, 1.4],
-            y=[0.0, 0.0, 0.0],
-            z=[0.35, 0.5, 0.35],
-            mode="lines",
-            line=dict(color=colors["canopy"], width=10),
-            name="Canopy",
-            hovertemplate="Cockpit canopy<extra></extra>",
-        )
-    )
-
-    # Engines (fault-indicator color)
-    fig.add_trace(
-        go.Scatter3d(
-            x=[-0.9, -0.9],
-            y=[-0.52, 0.52],
-            z=[-0.22, -0.22],
+            x=[-1.1, -1.1],
+            y=[-0.58, 0.58],
+            z=[-0.11, -0.11],
             mode="markers+text",
-            marker=dict(size=16, color=colors["engines"], symbol="circle"),
+            marker=dict(size=8, color=colors["engines"], symbol="circle"),
             text=["L ENG", "R ENG"],
             textposition="top center",
-            name="Engines",
+            name="Engine Status",
             hovertemplate="Engine status: " + colors["status"] + "<extra></extra>",
-        )
-    )
-
-    # Nose point
-    fig.add_trace(
-        go.Scatter3d(
-            x=[3.7],
-            y=[0.0],
-            z=[0.0],
-            mode="markers",
-            marker=dict(size=7, color="#b2ffd1"),
-            name="Nose",
-            hovertemplate="Nose<extra></extra>",
         )
     )
 
@@ -252,12 +315,12 @@ def _aircraft_3d_figure(latest: pd.Series) -> go.Figure:
             yaxis=dict(visible=False, backgroundcolor="black"),
             zaxis=dict(visible=False, backgroundcolor="black"),
             bgcolor="black",
-            camera=dict(eye=dict(x=1.5, y=1.35, z=0.9)),
+            camera=dict(eye=dict(x=1.55, y=1.35, z=0.85)),
             aspectmode="manual",
-            aspectratio=dict(x=2.2, y=1.5, z=0.8),
+            aspectratio=dict(x=2.4, y=1.6, z=0.9),
         ),
         legend=dict(font=dict(color="#00ff66"), orientation="h", y=1.02, x=0.01),
-        title="3D AIRCRAFT STATUS",
+        title="3D AIRCRAFT STATUS (HIGH-FIDELITY MODEL)",
     )
     return fig
 
