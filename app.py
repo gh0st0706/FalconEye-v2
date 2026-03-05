@@ -189,6 +189,7 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
   const rootEl = document.getElementById("rafale-viewer-root");
   const modelUrl = {json.dumps(model_data_uri)};
   const anomalyPayload = {json.dumps(anomaly_payload)};
+  const handTrackingEnabled = {"true" if enable_hand_tracking else "false"};
 
   function loadScript(url) {{
     return new Promise((resolve, reject) => {{
@@ -225,12 +226,19 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
     "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js",
     "https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js"
   ];
+  const MP_HANDS_URLS = [
+    "https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js",
+    "https://unpkg.com/@mediapipe/hands/hands.js"
+  ];
 
   try {{
     statusEl.textContent = "Loading Three.js libraries...";
     await loadAny(THREE_URLS, "three");
     await loadAny(ORBIT_URLS, "orbit");
     await loadAny(GLTF_URLS, "gltf");
+    if (handTrackingEnabled) {{
+      await loadAny(MP_HANDS_URLS, "mediapipe-hands");
+    }}
   }} catch (libErr) {{
     console.error("Library bootstrap failed:", libErr);
     statusEl.textContent = "3D libraries blocked/unavailable on this network";
@@ -259,6 +267,12 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
   controls.autoRotate = true;
   controls.autoRotateSpeed = 0.5;
   controls.target.set(0, 0, 0);
+
+  let trackedModel = null;
+  const baseRotation = {{ x: 0, y: 0, z: 0 }};
+  const desiredRotation = {{ x: 0, y: 0, z: 0 }};
+  let handPaused = false;
+  let lastPinchDist = null;
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.7));
   const key = new THREE.DirectionalLight(0xffffff, 1.1);
@@ -290,6 +304,111 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
     return tokens.some((t) => meshName.includes(String(t).toLowerCase()));
   }}
 
+  function detectFist(lm) {{
+    return (
+      lm[8].y > lm[6].y &&
+      lm[12].y > lm[10].y &&
+      lm[16].y > lm[14].y &&
+      lm[20].y > lm[18].y
+    );
+  }}
+
+  function detectOpenPalm(lm) {{
+    return (
+      lm[8].y < lm[6].y &&
+      lm[12].y < lm[10].y &&
+      lm[16].y < lm[14].y &&
+      lm[20].y < lm[18].y
+    );
+  }}
+
+  function detectPinch(lm) {{
+    const dx = lm[4].x - lm[8].x;
+    const dy = lm[4].y - lm[8].y;
+    const dz = (lm[4].z || 0) - (lm[8].z || 0);
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  }}
+
+  async function initHandTracking() {{
+    if (!handTrackingEnabled) return;
+    if (!window.Hands || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
+      statusEl.textContent = "Viewer loaded (hand tracking unavailable)";
+      return;
+    }}
+    const hands = new window.Hands({{
+      locateFile: (file) => "https://cdn.jsdelivr.net/npm/@mediapipe/hands/" + file
+    }});
+    hands.setOptions({{
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.65,
+      minTrackingConfidence: 0.6
+    }});
+
+    hands.onResults((results) => {{
+      if (!trackedModel || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
+      const lm = results.multiHandLandmarks[0];
+      if (!lm || lm.length < 21) return;
+
+      if (detectFist(lm) && !handPaused) {{
+        handPaused = true;
+        statusEl.textContent = "Tracking paused (fist)";
+        return;
+      }}
+      if (handPaused) {{
+        if (detectOpenPalm(lm)) {{
+          handPaused = false;
+          statusEl.textContent = "Tracking resumed";
+        }}
+        return;
+      }}
+
+      const cx = lm[9].x;
+      const cy = lm[9].y;
+      desiredRotation.y = THREE.MathUtils.clamp((cx - 0.5) * -2.4, -1.15, 1.15);
+      desiredRotation.x = THREE.MathUtils.clamp((0.5 - cy) * 2.1, -0.78, 0.78);
+      desiredRotation.z = THREE.MathUtils.clamp(Math.atan2(lm[5].y - lm[17].y, lm[5].x - lm[17].x) * 0.9, -0.95, 0.95);
+
+      const pinchDist = detectPinch(lm);
+      if (pinchDist < 0.055) {{
+        if (lastPinchDist !== null) {{
+          const delta = pinchDist - lastPinchDist;
+          const toCam = camera.position.clone().sub(controls.target).normalize();
+          const cur = camera.position.distanceTo(controls.target);
+          const next = THREE.MathUtils.clamp(cur + delta * 36.0, 4.5, 26.0);
+          camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(next)));
+          statusEl.textContent = "Pinch zoom active";
+        }}
+        lastPinchDist = pinchDist;
+      }} else {{
+        lastPinchDist = null;
+        statusEl.textContent = "Hand tracking active";
+      }}
+    }});
+
+    const video = document.createElement("video");
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.style.display = "none";
+    rootEl.appendChild(video);
+    const stream = await navigator.mediaDevices.getUserMedia({{
+      video: {{ facingMode: "user", width: {{ ideal: 640 }}, height: {{ ideal: 480 }} }},
+      audio: false
+    }});
+    video.srcObject = stream;
+    await video.play();
+    statusEl.textContent = "Hand tracking active";
+
+    async function pump() {{
+      if (video.readyState >= 2) {{
+        await hands.send({{ image: video }});
+      }}
+      requestAnimationFrame(pump);
+    }}
+    pump();
+  }}
+
   const loader = new THREE.GLTFLoader();
   loader.load(
     modelUrl,
@@ -311,6 +430,9 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
         node.material.metalness = Math.max(node.material.metalness || 0, 0.35);
         node.material.roughness = Math.min(node.material.roughness || 0.8, 0.62);
         if (node.material.color) node.material.color.lerp(hull, 0.25);
+        node.material.transparent = true;
+        node.material.opacity = 0.08;
+        node.material.depthWrite = false;
 
         const meshName = (node.name || "").toLowerCase();
         const hit = anomalyRegions.find((r) => meshMatches(meshName, r));
@@ -319,7 +441,19 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
           node.material.emissive.copy(red);
           node.material.emissiveIntensity = 1.05;
           if (node.material.color) node.material.color.lerp(red, 0.55);
+          node.material.opacity = 0.62;
+          node.material.depthWrite = true;
         }}
+
+        const edges = new THREE.EdgesGeometry(node.geometry, 18);
+        const edgeMat = new THREE.LineBasicMaterial({{
+          color: hit ? red : new THREE.Color("#7fffb2"),
+          transparent: true,
+          opacity: hit ? 1.0 : 0.95
+        }});
+        const lines = new THREE.LineSegments(edges, edgeMat);
+        lines.renderOrder = 2;
+        node.add(lines);
       }});
 
       scene.add(model);
@@ -329,10 +463,12 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
       const sbox = new THREE.Box3().setFromObject(model);
       model.position.sub(sbox.getCenter(new THREE.Vector3()));
       fitCameraToObject(model);
-
-      statusEl.textContent = "Viewer loaded";
-      statusEl.style.opacity = "0";
-      statusEl.style.transition = "opacity 300ms ease";
+      trackedModel = model;
+      baseRotation.x = model.rotation.x;
+      baseRotation.y = model.rotation.y;
+      baseRotation.z = model.rotation.z;
+      statusEl.textContent = handTrackingEnabled ? "Viewer loaded (starting hand tracking...)" : "Viewer loaded";
+      initHandTracking();
     }},
     function(evt) {{
       if (evt.total) {{
@@ -361,6 +497,11 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
   window.addEventListener("resize", onResize);
 
   function animate() {{
+    if (trackedModel && handTrackingEnabled && !handPaused) {{
+      trackedModel.rotation.x = THREE.MathUtils.lerp(trackedModel.rotation.x, baseRotation.x + desiredRotation.x, 0.16);
+      trackedModel.rotation.y = THREE.MathUtils.lerp(trackedModel.rotation.y, baseRotation.y + desiredRotation.y, 0.16);
+      trackedModel.rotation.z = THREE.MathUtils.lerp(trackedModel.rotation.z, baseRotation.z + desiredRotation.z, 0.14);
+    }}
     controls.update();
     renderer.render(scene, camera);
     requestAnimationFrame(animate);
