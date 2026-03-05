@@ -311,6 +311,67 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
     return tokens.some((t) => meshName.includes(String(t).toLowerCase()));
   }}
 
+  function vComp(v, idx) {{
+    if (idx === 0) return v.x;
+    if (idx === 1) return v.y;
+    return v.z;
+  }}
+
+  // Infer engine meshes when model names are generic.
+  function inferEngineMeshes(model, engineTokens) {{
+    const byName = new Set();
+    const meshInfo = [];
+    const overall = new THREE.Box3().setFromObject(model);
+    const oSize = overall.getSize(new THREE.Vector3());
+    const oCenter = overall.getCenter(new THREE.Vector3());
+    const longAxis = (oSize.x >= oSize.y && oSize.x >= oSize.z) ? 0 : (oSize.y >= oSize.z ? 1 : 2);
+    const orth = [0, 1, 2].filter((a) => a !== longAxis);
+
+    model.traverse(function(node) {{
+      if (!node.isMesh || !node.geometry) return;
+      const meshName = (node.name || "").toLowerCase();
+      if (engineTokens.some((token) => meshName.includes(token))) {{
+        byName.add(node);
+      }}
+      const bb = new THREE.Box3().setFromObject(node);
+      const c = bb.getCenter(new THREE.Vector3());
+      const s = bb.getSize(new THREE.Vector3());
+      const spanLong = Math.max(vComp(oSize, longAxis), 1e-6);
+      const t = (vComp(c, longAxis) - vComp(overall.min, longAxis)) / spanLong;
+      const spanA = Math.max(vComp(oSize, orth[0]) * 0.5, 1e-6);
+      const spanB = Math.max(vComp(oSize, orth[1]) * 0.5, 1e-6);
+      const radial = Math.sqrt(
+        Math.pow((vComp(c, orth[0]) - vComp(oCenter, orth[0])) / spanA, 2) +
+        Math.pow((vComp(c, orth[1]) - vComp(oCenter, orth[1])) / spanB, 2)
+      );
+      const sizeW = Math.max(1e-5, s.x * s.y * s.z);
+      meshInfo.push({{ node, t, radial, sizeW }});
+    }});
+
+    if (byName.size > 0) return byName;
+    if (meshInfo.length === 0) return byName;
+
+    // Choose tail-end by scoring compact meshes near either longitudinal end.
+    let minEndScore = 0.0;
+    let maxEndScore = 0.0;
+    for (const m of meshInfo) {{
+      const dMin = m.t;
+      const dMax = 1.0 - m.t;
+      if (dMin < 0.40) minEndScore += (0.40 - dMin) * (1.4 - Math.min(m.radial, 1.4)) * m.sizeW;
+      if (dMax < 0.40) maxEndScore += (0.40 - dMax) * (1.4 - Math.min(m.radial, 1.4)) * m.sizeW;
+    }}
+    const chooseMinEnd = minEndScore >= maxEndScore;
+
+    const inferred = new Set();
+    for (const m of meshInfo) {{
+      const endDist = chooseMinEnd ? m.t : (1.0 - m.t);
+      if (endDist < 0.33 && m.radial < 1.15) {{
+        inferred.add(m.node);
+      }}
+    }}
+    return inferred;
+  }}
+
   function pointDist(a, b) {{
     const dx = a.x - b.x;
     const dy = a.y - b.y;
@@ -503,6 +564,7 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
       const red = new THREE.Color("#ff1a1a");
       const hull = new THREE.Color("#95a29b");
       const engineTokens = ["engine", "nozzle", "turbine", "exhaust", "afterburner"];
+      const engineMeshSet = inferEngineMeshes(model, engineTokens);
 
       model.traverse(function(node) {{
         if (!node.isMesh) return;
@@ -517,7 +579,7 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
 
         const meshName = (node.name || "").toLowerCase();
         const hit = anomalyRegions.find((r) => meshMatches(meshName, r));
-        const isEngineMesh = engineTokens.some((token) => meshName.includes(token));
+        const isEngineMesh = engineMeshSet.has(node);
         const engineWarning = isEngineMesh && (riskLevel === "warning" || riskLevel === "critical");
         if (hit) {{
           if (!node.material.emissive) node.material.emissive = red.clone();
