@@ -4,6 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit.components.v1 as components
 import base64
+import json
 from pathlib import Path
 from engine import EngineStateModel
 from stream_processor import StreamingTelemetryProcessor, normalize_telemetry_frame
@@ -167,7 +168,7 @@ def _resolve_rafale_model_data_uri(uploaded_model) -> tuple[str | None, str | No
     return None, None
 
 
-def _threejs_rafale_html(model_data_uri: str, risk_level: str) -> str:
+def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: dict) -> str:
     if risk_level == "Critical":
         engine_color = "#ff1a1a"
         hull_tint = "#75625f"
@@ -204,6 +205,7 @@ const modelUrl = "__MODEL_DATA_URI__";
 const engineColor = new THREE.Color("__ENGINE_COLOR__");
 const hullTint = new THREE.Color("__HULL_TINT__");
 const engineTokens = ["engine", "nozzle", "exhaust", "turbine", "afterburner"];
+const anomalyPayload = __ANOMALY_PAYLOAD__;
 const skeletonLineColor = new THREE.Color("#7fffb2");
 const skeletonSurfaceOpacity = 0.08;
 const skeletonLineOpacity = 0.95;
@@ -286,6 +288,16 @@ loader.load(
       return;
     }
 
+    let highlightedCount = 0;
+    const anomalyLabels = [];
+    const anomalyRegions = (anomalyPayload && anomalyPayload.regions) ? anomalyPayload.regions : [];
+    const regionColor = new THREE.Color("#ff1a1a");
+
+    function meshMatchesRegion(meshName, region) {
+      const tokens = Array.isArray(region.tokens) ? region.tokens : [];
+      return tokens.some((token) => meshName.includes(String(token).toLowerCase()));
+    }
+
     console.group("Rafale hierarchy");
     model.traverse((node) => {
       console.log(node.type, node.name || "(unnamed)");
@@ -308,6 +320,17 @@ loader.load(
         node.material.emissive.copy(engineColor);
         node.material.emissiveIntensity = 0.9;
         if (node.material.color) node.material.color.lerp(engineColor, 0.35);
+      }
+
+      for (const region of anomalyRegions) {
+        if (!meshMatchesRegion(meshName, region)) continue;
+        if (!node.material.emissive) node.material.emissive = regionColor.clone();
+        node.material.emissive.copy(regionColor);
+        node.material.emissiveIntensity = 1.15;
+        if (node.material.color) node.material.color.lerp(regionColor, 0.55);
+        highlightedCount += 1;
+        if (region.label) anomalyLabels.push(region.label);
+        break;
       }
 
       const edges = new THREE.EdgesGeometry(node.geometry, skeletonEdgeAngle);
@@ -342,6 +365,11 @@ loader.load(
 
     scene.add(model);
     fitCameraToBox(new THREE.Box3().setFromObject(model));
+
+    if (highlightedCount > 0) {
+      const uniq = [...new Set(anomalyLabels)];
+      progressEl.textContent = "Anomaly regions highlighted: " + uniq.join(", ");
+    }
 
     progressEl.style.transition = "opacity 350ms ease";
     setTimeout(() => { progressEl.style.opacity = "0.0"; }, 800);
@@ -388,11 +416,55 @@ animate();
 </script>
 """
     return (
-        html.replace("__MODEL_DATA_URI__", model_data_uri)
+    html.replace("__MODEL_DATA_URI__", model_data_uri)
         .replace("__ENGINE_COLOR__", engine_color)
         .replace("__HULL_TINT__", hull_tint)
+        .replace("__ANOMALY_PAYLOAD__", json.dumps(anomaly_payload))
         .replace("__STATUS__", status)
     )
+
+
+def _anomaly_regions(latest: pd.Series) -> dict:
+    risk = str(latest.get("risk_level", "Normal")).lower()
+    reason = str(latest.get("primary_reason", "")).lower()
+    reason_code = str(latest.get("reason_codes", "")).lower()
+
+    regions = []
+    if risk in {"warning", "critical"}:
+        if "temp_deviation" in reason or "temp_deviation" in reason_code:
+            regions.append(
+                {
+                    "label": "Thermal anomaly",
+                    "tokens": ["engine", "nozzle", "exhaust", "afterburner", "turbine"],
+                    "severity": risk,
+                }
+            )
+        elif "vibration_excess" in reason or "vibration_excess" in reason_code:
+            regions.append(
+                {
+                    "label": "Vibration anomaly",
+                    "tokens": ["turbine", "fan", "compressor", "shaft", "engine"],
+                    "severity": risk,
+                }
+            )
+        elif "efficiency_drop" in reason or "efficiency_drop" in reason_code:
+            regions.append(
+                {
+                    "label": "Efficiency anomaly",
+                    "tokens": ["intake", "inlet", "compressor", "exhaust", "engine"],
+                    "severity": risk,
+                }
+            )
+        else:
+            regions.append(
+                {
+                    "label": "General anomaly",
+                    "tokens": ["engine", "nozzle", "turbine", "exhaust"],
+                    "severity": risk,
+                }
+            )
+
+    return {"risk": risk, "regions": regions}
 
 
 def _aircraft_3d_figure(latest: pd.Series) -> go.Figure:
@@ -823,10 +895,15 @@ st.markdown("### AIRCRAFT DIGITAL TWIN")
 fault_colors = _fault_color_map(str(latest["risk_level"]))
 air_col1, air_col2 = st.columns([2, 1])
 model_data_uri, model_source = _resolve_rafale_model_data_uri(rafale_model_file)
+anomaly_payload = _anomaly_regions(latest)
 
 with air_col1:
     if model_data_uri:
-        components.html(_threejs_rafale_html(model_data_uri, str(latest["risk_level"])), height=620, scrolling=False)
+        components.html(
+            _threejs_rafale_html(model_data_uri, str(latest["risk_level"]), anomaly_payload),
+            height=620,
+            scrolling=False,
+        )
     else:
         st.warning(
             "Rafale model not found. Upload a `.glb`/`.gltf` in the sidebar or add "
@@ -839,9 +916,11 @@ with air_col2:
     st.metric("FAULT LEVEL", str(latest["risk_level"]).upper())
     st.metric("ENGINE VISUAL", "RED" if str(latest["risk_level"]) in {"Warning", "Critical"} else "GREEN")
     st.metric("3D MODEL SOURCE", model_source if model_source else "SCHEMATIC FALLBACK")
+    active_regions = ", ".join([region["label"] for region in anomaly_payload["regions"]]) if anomaly_payload["regions"] else "NONE"
+    st.metric("ANOMALY REGIONS", active_regions)
     st.caption(
-        "Three.js applies fault colors to engine meshes by name "
-        "(`engine`, `nozzle`, `exhaust`, `turbine`)."
+        "Fault regions are highlighted in red using mesh-name matching "
+        "(`engine`, `nozzle`, `turbine`, `exhaust`, etc.)."
     )
 
 st.markdown("#### LIVE FEATURE DATAFRAME")

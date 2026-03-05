@@ -25,6 +25,11 @@ import { OrbitControls } from "https://esm.sh/three@0.162.0/examples/jsm/control
 import { GLTFLoader } from "https://esm.sh/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
 
 const DEFAULT_ENGINE_TOKENS = ["engine", "nozzle", "turbine", "exhaust", "afterburner"];
+const DEFAULT_ANOMALY_REGION_TOKENS = {
+  thermal: ["engine", "nozzle", "exhaust", "afterburner", "turbine"],
+  vibration: ["turbine", "fan", "compressor", "shaft", "engine"],
+  efficiency: ["intake", "inlet", "compressor", "exhaust", "engine"],
+};
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
@@ -311,7 +316,14 @@ export function createRafaleViewer(config) {
   }
 
   function clearAnomalyHighlight() {
-    for (const mesh of engineMeshes) restoreMaterial(mesh);
+    if (aircraft) {
+      aircraft.traverse((obj) => {
+        if (!obj.isMesh || !obj.material) return;
+        restoreMaterial(obj);
+      });
+    } else {
+      for (const mesh of engineMeshes) restoreMaterial(mesh);
+    }
   }
 
   function highlightParts(tokens, color = "#ffd400", intensity = 0.9) {
@@ -331,6 +343,59 @@ export function createRafaleViewer(config) {
       hits.push(obj.name || "(unnamed)");
     });
     return hits;
+  }
+
+  function highlightAnomalyRegions(
+    regions = [],
+    { color = "#ff1a1a", intensity = 1.15, clearExisting = true, fallbackToEngine = true } = {}
+  ) {
+    if (!aircraft) return [];
+    if (clearExisting) clearAnomalyHighlight();
+
+    const regionDefs = Array.isArray(regions) ? regions : [];
+    const matched = [];
+    const colorObj = new THREE.Color(color);
+
+    const normalized = regionDefs.map((region) => {
+      const key = String(region?.key || region?.label || "").toLowerCase();
+      const defaultTokens = DEFAULT_ANOMALY_REGION_TOKENS[key] || [];
+      const tokens = (Array.isArray(region?.tokens) && region.tokens.length > 0)
+        ? region.tokens.map((t) => String(t).toLowerCase())
+        : defaultTokens;
+      return {
+        label: region?.label || key || "anomaly",
+        tokens,
+      };
+    }).filter((r) => r.tokens.length > 0);
+
+    aircraft.traverse((obj) => {
+      if (!obj.isMesh || !obj.material) return;
+      const n = (obj.name || "").toLowerCase();
+      const hitRegion = normalized.find((r) => r.tokens.some((token) => n.includes(token)));
+      if (!hitRegion) return;
+      backupMaterial(obj);
+      if (obj.material.color) obj.material.color.lerp(colorObj, 0.55);
+      if (!obj.material.emissive) obj.material.emissive = colorObj.clone();
+      obj.material.emissive.copy(colorObj);
+      obj.material.emissiveIntensity = intensity;
+      obj.material.needsUpdate = true;
+      matched.push({ mesh: obj.name || "(unnamed)", region: hitRegion.label });
+    });
+
+    if (fallbackToEngine && matched.length === 0) {
+      for (const mesh of engineMeshes) {
+        if (!mesh.material) continue;
+        backupMaterial(mesh);
+        if (mesh.material.color) mesh.material.color.lerp(colorObj, 0.55);
+        if (!mesh.material.emissive) mesh.material.emissive = colorObj.clone();
+        mesh.material.emissive.copy(colorObj);
+        mesh.material.emissiveIntensity = intensity;
+        mesh.material.needsUpdate = true;
+        matched.push({ mesh: mesh.name || "(unnamed)", region: "engine-fallback" });
+      }
+    }
+
+    return matched;
   }
 
   // External telemetry hook: angles in radians.
@@ -444,6 +509,7 @@ export function createRafaleViewer(config) {
     setAnomalyState,
     clearAnomalyHighlight,
     highlightParts,
+    highlightAnomalyRegions,
     setSkeletonMode: (enabled = true, options = {}) => {
       skeletonEnabled = !!enabled;
       if (!aircraft) return;
