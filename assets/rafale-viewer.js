@@ -23,6 +23,7 @@
 import * as THREE from "https://esm.sh/three@0.162.0";
 import { OrbitControls } from "https://esm.sh/three@0.162.0/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "https://esm.sh/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
+import { HandLandmarker, FilesetResolver } from "https://esm.sh/@mediapipe/tasks-vision@0.10.14";
 
 const DEFAULT_ENGINE_TOKENS = ["engine", "nozzle", "turbine", "exhaust", "afterburner"];
 const DEFAULT_ANOMALY_REGION_TOKENS = {
@@ -137,6 +138,15 @@ export function createRafaleViewer(config) {
   const baseSkeletonColor = config.skeletonColor || "#7fffb2";
   const baseSkeletonLineOpacity = config.skeletonLineOpacity ?? 0.95;
   const baseSkeletonSurfaceOpacity = config.skeletonSurfaceOpacity ?? 0.08;
+  const handTrackingEnabled = config.enableHandTracking ?? false;
+  let mpVideo = null;
+  let mpStream = null;
+  let handLandmarker = null;
+  let lastHandTs = 0;
+  let desiredHandRotation = { pitch: 0.0, yaw: 0.0, roll: 0.0 };
+  let baseModelRotation = new THREE.Euler(0.0, 0.0, 0.0, "XYZ");
+  let lastGesture = "none";
+  let lastGestureTs = 0;
 
   function debugHierarchy(node, depth = 0) {
     if (!debug) return;
@@ -145,6 +155,98 @@ export function createRafaleViewer(config) {
     console.log(`${indent}${marker} ${node.name || "(unnamed)"} (${node.type})`);
     for (const child of node.children || []) {
       debugHierarchy(child, depth + 1);
+    }
+  }
+
+  function classifyGesture(lm) {
+    const isExtended = (tip, pip) => lm[tip].y < lm[pip].y;
+    const indexUp = isExtended(8, 6);
+    const middleUp = isExtended(12, 10);
+    const ringUp = isExtended(16, 14);
+    const pinkyUp = isExtended(20, 18);
+    const thumbOpen = lm[4].x > lm[3].x;
+    const extendedCount = [indexUp, middleUp, ringUp, pinkyUp, thumbOpen].filter(Boolean).length;
+    const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+    if (pinchDist < 0.055) return { name: "pinch", pinchDist };
+    if (extendedCount <= 1) return { name: "fist", pinchDist };
+    if (indexUp && middleUp && !ringUp && !pinkyUp) return { name: "victory", pinchDist };
+    if (extendedCount >= 4) return { name: "open_palm", pinchDist };
+    return { name: "track", pinchDist };
+  }
+
+  async function initMediaPipeHandTracking() {
+    if (!handTrackingEnabled) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      progressEl.textContent = "Hand tracking unavailable (no camera API)";
+      return;
+    }
+    try {
+      progressEl.textContent = "Loading MediaPipe hand tracking...";
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+      );
+      handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
+        },
+        runningMode: "VIDEO",
+        numHands: 1,
+      });
+      mpVideo = document.createElement("video");
+      mpVideo.autoplay = true;
+      mpVideo.muted = true;
+      mpVideo.playsInline = true;
+      mpVideo.style.display = "none";
+      container.appendChild(mpVideo);
+      mpStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false,
+      });
+      mpVideo.srcObject = mpStream;
+      await mpVideo.play();
+      progressEl.textContent = "Hand tracking active";
+    } catch (err) {
+      console.error("MediaPipe hand tracking init failed:", err);
+      progressEl.textContent = "Hand tracking blocked/unavailable";
+    }
+  }
+
+  function updateMediaPipeHandTracking() {
+    if (!handTrackingEnabled || !handLandmarker || !mpVideo || mpVideo.readyState < 2 || !aircraft) return;
+    const now = performance.now();
+    if (now - lastHandTs < 33) return;
+    lastHandTs = now;
+    const result = handLandmarker.detectForVideo(mpVideo, now);
+    if (!result?.landmarks?.length) return;
+    const lm = result.landmarks[0];
+    const gesture = classifyGesture(lm);
+
+    const centerX = (lm[0].x + lm[5].x + lm[9].x + lm[13].x + lm[17].x) / 5.0;
+    const centerY = (lm[0].y + lm[5].y + lm[9].y + lm[13].y + lm[17].y) / 5.0;
+    const palmDx = lm[5].x - lm[17].x;
+    const palmDy = lm[5].y - lm[17].y;
+    desiredHandRotation.yaw = THREE.MathUtils.clamp((centerX - 0.5) * -2.4, -1.15, 1.15);
+    desiredHandRotation.pitch = THREE.MathUtils.clamp((0.5 - centerY) * 2.1, -0.75, 0.75);
+    desiredHandRotation.roll = THREE.MathUtils.clamp(Math.atan2(palmDy, palmDx) * 0.9, -0.85, 0.85);
+
+    if (gesture.name === "pinch") {
+      const zoomFactor = THREE.MathUtils.clamp((gesture.pinchDist - 0.03) / 0.20, 0.0, 1.0);
+      const maxDistance = 26.0;
+      const minDistance = 4.5;
+      const targetDistance = maxDistance - zoomFactor * (maxDistance - minDistance);
+      const toCam = camera.position.clone().sub(controls.target).normalize();
+      camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(targetDistance)));
+    }
+
+    if (gesture.name !== lastGesture && now - lastGestureTs > 600) {
+      if (gesture.name === "victory") {
+        controls.autoRotate = !controls.autoRotate;
+      } else if (gesture.name === "open_palm") {
+        desiredHandRotation = { pitch: 0.0, yaw: 0.0, roll: 0.0 };
+      }
+      lastGesture = gesture.name;
+      lastGestureTs = now;
     }
   }
 
@@ -456,6 +558,12 @@ export function createRafaleViewer(config) {
         ground.material.emissive = new THREE.Color(0x00ff66);
         ground.material.emissiveIntensity = 0.012 + 0.008 * Math.sin(t * 1.4);
       }
+      updateMediaPipeHandTracking();
+      if (aircraft && handTrackingEnabled) {
+        aircraft.rotation.x = THREE.MathUtils.lerp(aircraft.rotation.x, baseModelRotation.x + desiredHandRotation.pitch, 0.16);
+        aircraft.rotation.y = THREE.MathUtils.lerp(aircraft.rotation.y, baseModelRotation.y + desiredHandRotation.yaw, 0.16);
+        aircraft.rotation.z = THREE.MathUtils.lerp(aircraft.rotation.z, baseModelRotation.z + desiredHandRotation.roll, 0.14);
+      }
       controls.update();
       renderer.render(scene, camera);
       animationFrame = requestAnimationFrame(loop);
@@ -498,6 +606,7 @@ export function createRafaleViewer(config) {
     rootGroup.add(aircraft);
 
     const bounds = normalizeModel(aircraft);
+    baseModelRotation = new THREE.Euler(aircraft.rotation.x, aircraft.rotation.y, aircraft.rotation.z, "XYZ");
     fitCameraToModel(bounds, false);
     collectEngineMeshes(aircraft, config.engineTokens || DEFAULT_ENGINE_TOKENS);
     applySkeletonView(aircraft, {
@@ -515,6 +624,7 @@ export function createRafaleViewer(config) {
     }, 600);
 
     if (!animationFrame) startRenderLoop();
+    if (handTrackingEnabled) initMediaPipeHandTracking();
     return { bounds, engineMeshes: [...engineMeshes] };
   }
 
@@ -530,6 +640,13 @@ export function createRafaleViewer(config) {
     }
     if (progressEl.parentElement === container) {
       container.removeChild(progressEl);
+    }
+    if (mpStream) {
+      for (const track of mpStream.getTracks()) track.stop();
+      mpStream = null;
+    }
+    if (mpVideo && mpVideo.parentElement === container) {
+      container.removeChild(mpVideo);
     }
   }
 

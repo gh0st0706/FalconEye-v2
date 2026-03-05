@@ -168,7 +168,7 @@ def _resolve_rafale_model_data_uri(uploaded_model) -> tuple[str | None, str | No
     return None, None
 
 
-def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: dict) -> str:
+def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: dict, enable_hand_tracking: bool) -> str:
     if risk_level == "Critical":
         engine_color = "#ff1a1a"
         hull_tint = "#75625f"
@@ -190,6 +190,9 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
   <div id="rafale-progress" style="position:absolute;bottom:10px;left:12px;color:#8bd7a5;font-family:Rajdhani,Segoe UI,sans-serif;z-index:10;">
     Loading 3D model...
   </div>
+  <div id="rafale-track-status" style="position:absolute;top:38px;left:12px;color:#8bd7a5;font-family:Rajdhani,Segoe UI,sans-serif;z-index:10;">
+    Hand tracking: standby
+  </div>
   <canvas id="rafale-canvas" style="width:100%;height:100%;display:block;"></canvas>
 </div>
 
@@ -197,10 +200,12 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
 import * as THREE from "https://esm.sh/three@0.162.0";
 import { OrbitControls } from "https://esm.sh/three@0.162.0/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "https://esm.sh/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
+import { HandLandmarker, FilesetResolver } from "https://esm.sh/@mediapipe/tasks-vision@0.10.14";
 
 const canvas = document.getElementById("rafale-canvas");
 const wrap = document.getElementById("rafale-wrap");
 const progressEl = document.getElementById("rafale-progress");
+const trackingEl = document.getElementById("rafale-track-status");
 const modelUrl = "__MODEL_DATA_URI__";
 const engineColor = new THREE.Color("__ENGINE_COLOR__");
 const hullTint = new THREE.Color("__HULL_TINT__");
@@ -211,6 +216,17 @@ const skeletonSurfaceOpacity = 0.08;
 const anomalySurfaceOpacity = 0.62;
 const skeletonLineOpacity = 0.95;
 const skeletonEdgeAngle = 18;
+const handTrackingEnabled = __HAND_TRACKING__;
+
+let trackedModel = null;
+let baselineRotation = new THREE.Euler(0.0, 0.0, 0.0, "XYZ");
+let mpVideo = null;
+let mpStream = null;
+let handLandmarker = null;
+let desiredRotation = { pitch: 0.0, yaw: 0.0, roll: 0.0 };
+let lastHandTs = 0;
+let lastGesture = "none";
+let lastGestureTs = 0;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -367,6 +383,8 @@ loader.load(
     const centeredMinY = centeredBox.min.y;
     model.position.y += -centeredMinY + centeredSize.y * 0.03;
 
+    trackedModel = model;
+    baselineRotation = new THREE.Euler(model.rotation.x, model.rotation.y, model.rotation.z, "XYZ");
     scene.add(model);
     fitCameraToBox(new THREE.Box3().setFromObject(model));
 
@@ -398,6 +416,122 @@ loader.load(
   }
 );
 
+async function initHandTracking() {
+  if (!handTrackingEnabled) {
+    trackingEl.textContent = "Hand tracking: off";
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    trackingEl.textContent = "Hand tracking unavailable (no camera API)";
+    return;
+  }
+
+  try {
+    trackingEl.textContent = "Hand tracking: loading MediaPipe...";
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+    );
+    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
+      },
+      runningMode: "VIDEO",
+      numHands: 1,
+    });
+
+    mpVideo = document.createElement("video");
+    mpVideo.autoplay = true;
+    mpVideo.muted = true;
+    mpVideo.playsInline = true;
+    mpVideo.style.display = "none";
+    wrap.appendChild(mpVideo);
+
+    mpStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false,
+    });
+    mpVideo.srcObject = mpStream;
+    await mpVideo.play();
+    trackingEl.textContent = "Hand tracking: active (gesture mode)";
+  } catch (err) {
+    console.error("MediaPipe hand tracking init failed:", err);
+    trackingEl.textContent = "Hand tracking blocked/unavailable";
+  }
+}
+
+function classifyGesture(lm) {
+  const isExtended = (tip, pip) => lm[tip].y < lm[pip].y;
+  const indexUp = isExtended(8, 6);
+  const middleUp = isExtended(12, 10);
+  const ringUp = isExtended(16, 14);
+  const pinkyUp = isExtended(20, 18);
+  const thumbOpen = lm[4].x > lm[3].x;
+  const extendedCount = [indexUp, middleUp, ringUp, pinkyUp, thumbOpen].filter(Boolean).length;
+  const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+
+  if (pinchDist < 0.055) return { name: "pinch", pinchDist };
+  if (extendedCount <= 1) return { name: "fist", pinchDist };
+  if (indexUp && middleUp && !ringUp && !pinkyUp) return { name: "victory", pinchDist };
+  if (extendedCount >= 4) return { name: "open_palm", pinchDist };
+  return { name: "track", pinchDist };
+}
+
+function applyGesture(gesture, lm, now) {
+  const centerX = (lm[0].x + lm[5].x + lm[9].x + lm[13].x + lm[17].x) / 5.0;
+  const centerY = (lm[0].y + lm[5].y + lm[9].y + lm[13].y + lm[17].y) / 5.0;
+  const palmDx = lm[5].x - lm[17].x;
+  const palmDy = lm[5].y - lm[17].y;
+
+  desiredRotation.yaw = THREE.MathUtils.clamp((centerX - 0.5) * -2.4, -1.15, 1.15);
+  desiredRotation.pitch = THREE.MathUtils.clamp((0.5 - centerY) * 2.1, -0.75, 0.75);
+  desiredRotation.roll = THREE.MathUtils.clamp(Math.atan2(palmDy, palmDx) * 0.9, -0.85, 0.85);
+
+  if (gesture.name === "pinch") {
+    const zoomFactor = THREE.MathUtils.clamp((gesture.pinchDist - 0.03) / 0.20, 0.0, 1.0);
+    const maxDistance = 26.0;
+    const minDistance = 4.5;
+    const targetDistance = maxDistance - zoomFactor * (maxDistance - minDistance);
+    const toCam = camera.position.clone().sub(controls.target).normalize();
+    camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(targetDistance)));
+  }
+
+  if (gesture.name !== lastGesture && now - lastGestureTs > 600) {
+    if (gesture.name === "victory") {
+      controls.autoRotate = !controls.autoRotate;
+      trackingEl.textContent = controls.autoRotate
+        ? "Hand tracking: active (auto-rotate on)"
+        : "Hand tracking: active (auto-rotate off)";
+    } else if (gesture.name === "open_palm") {
+      desiredRotation = { pitch: 0.0, yaw: 0.0, roll: 0.0 };
+      trackingEl.textContent = "Hand tracking: reset orientation";
+    }
+    lastGesture = gesture.name;
+    lastGestureTs = now;
+  }
+
+  if (gesture.name === "fist") {
+    trackingEl.textContent = "Hand tracking: fist hold";
+  } else if (gesture.name === "pinch") {
+    trackingEl.textContent = "Hand tracking: pinch zoom";
+  }
+}
+
+function updateHandTracking() {
+  if (!handTrackingEnabled || !handLandmarker || !mpVideo || mpVideo.readyState < 2) return;
+  const now = performance.now();
+  if (now - lastHandTs < 33) return;
+  lastHandTs = now;
+
+  const result = handLandmarker.detectForVideo(mpVideo, now);
+  if (!result || !result.landmarks || result.landmarks.length === 0) return;
+  const lm = result.landmarks[0];
+  if (!lm || lm.length < 21) return;
+
+  const gesture = classifyGesture(lm);
+  applyGesture(gesture, lm, now);
+}
+
 const onResize = () => {
   const w = Math.max(1, wrap.clientWidth);
   const h = Math.max(1, wrap.clientHeight);
@@ -412,11 +546,31 @@ const animate = () => {
   const t = clock.getElapsedTime();
   deck.material.emissive = new THREE.Color(0x00ff66);
   deck.material.emissiveIntensity = 0.012 + 0.008 * Math.sin(t * 1.4);
+
+  updateHandTracking();
+  if (trackedModel && handTrackingEnabled) {
+    trackedModel.rotation.x = THREE.MathUtils.lerp(
+      trackedModel.rotation.x,
+      baselineRotation.x + desiredRotation.pitch,
+      0.16
+    );
+    trackedModel.rotation.y = THREE.MathUtils.lerp(
+      trackedModel.rotation.y,
+      baselineRotation.y + desiredRotation.yaw,
+      0.16
+    );
+    trackedModel.rotation.z = THREE.MathUtils.lerp(
+      trackedModel.rotation.z,
+      baselineRotation.z + desiredRotation.roll,
+      0.14
+    );
+  }
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 };
 animate();
+initHandTracking();
 </script>
 """
     return (
@@ -424,6 +578,7 @@ animate();
         .replace("__ENGINE_COLOR__", engine_color)
         .replace("__HULL_TINT__", hull_tint)
         .replace("__ANOMALY_PAYLOAD__", json.dumps(anomaly_payload))
+        .replace("__HAND_TRACKING__", "true" if enable_hand_tracking else "false")
         .replace("__STATUS__", status)
     )
 
@@ -743,6 +898,7 @@ st.sidebar.header("MISSION PARAMETERS")
 
 uploaded_file = st.sidebar.file_uploader("Upload Telemetry CSV", type=["csv"])
 rafale_model_file = st.sidebar.file_uploader("Upload Rafale GLB/GLTF", type=["glb", "gltf"])
+enable_hand_tracking = st.sidebar.checkbox("Enable Hand Tracking (MediaPipe)", value=True)
 stream_chunk = st.sidebar.slider("Real-time Chunk Size", 10, 250, 40)
 
 presets = {
@@ -904,7 +1060,7 @@ anomaly_payload = _anomaly_regions(latest)
 with air_col1:
     if model_data_uri:
         components.html(
-            _threejs_rafale_html(model_data_uri, str(latest["risk_level"]), anomaly_payload),
+            _threejs_rafale_html(model_data_uri, str(latest["risk_level"]), anomaly_payload, enable_hand_tracking),
             height=620,
             scrolling=False,
         )
@@ -925,6 +1081,10 @@ with air_col2:
     st.caption(
         "Fault regions are highlighted in red using mesh-name matching "
         "(`engine`, `nozzle`, `turbine`, `exhaust`, etc.)."
+    )
+    st.caption(
+        "Hand gestures: move hand to rotate, pinch to zoom, victory sign toggles auto-rotate, "
+        "open palm resets orientation."
     )
 
 st.markdown("#### LIVE FEATURE DATAFRAME")
