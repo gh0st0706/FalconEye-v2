@@ -183,18 +183,62 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
   <div id="rafale-viewer-root" style="position:absolute;inset:0;"></div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.162.0/examples/js/controls/OrbitControls.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.162.0/examples/js/loaders/GLTFLoader.js"></script>
 <script>
-(function() {{
+(async function() {{
   const statusEl = document.getElementById("rafale-compat-status");
   const rootEl = document.getElementById("rafale-viewer-root");
   const modelUrl = {json.dumps(model_data_uri)};
   const anomalyPayload = {json.dumps(anomaly_payload)};
 
+  function loadScript(url) {{
+    return new Promise((resolve, reject) => {{
+      const s = document.createElement("script");
+      s.src = url;
+      s.async = true;
+      s.onload = () => resolve(url);
+      s.onerror = () => reject(new Error("Failed: " + url));
+      document.head.appendChild(s);
+    }});
+  }}
+
+  async function loadAny(candidates, label) {{
+    for (const url of candidates) {{
+      try {{
+        await loadScript(url);
+        return url;
+      }} catch (e) {{
+        console.warn(label + " load failed", url, e);
+      }}
+    }}
+    throw new Error(label + " failed on all CDNs");
+  }}
+
+  const THREE_URLS = [
+    "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js",
+    "https://unpkg.com/three@0.128.0/build/three.min.js"
+  ];
+  const ORBIT_URLS = [
+    "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js",
+    "https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"
+  ];
+  const GLTF_URLS = [
+    "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js",
+    "https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js"
+  ];
+
+  try {{
+    statusEl.textContent = "Loading Three.js libraries...";
+    await loadAny(THREE_URLS, "three");
+    await loadAny(ORBIT_URLS, "orbit");
+    await loadAny(GLTF_URLS, "gltf");
+  }} catch (libErr) {{
+    console.error("Library bootstrap failed:", libErr);
+    statusEl.textContent = "3D libraries blocked/unavailable on this network";
+    return;
+  }}
+
   if (!window.THREE || !THREE.OrbitControls || !THREE.GLTFLoader) {{
-    statusEl.textContent = "Three.js library failed to load";
+    statusEl.textContent = "Three.js libraries loaded incompletely";
     return;
   }}
 
