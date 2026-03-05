@@ -109,6 +109,158 @@ def _system_interpretation(latest: pd.Series) -> str:
         findings.append("Engine telemetry stable and within expected envelope")
     return ". ".join(findings) + "."
 
+
+def _fault_color_map(risk_level: str) -> dict:
+    if risk_level == "Critical":
+        return {
+            "fuselage": "#6b0000",
+            "wings": "#420000",
+            "engines": "#ff1a1a",
+            "canopy": "#550000",
+            "status": "CRITICAL",
+        }
+    if risk_level == "Warning":
+        return {
+            "fuselage": "#0f2b10",
+            "wings": "#103513",
+            "engines": "#ff4d00",
+            "canopy": "#1a331a",
+            "status": "WARNING",
+        }
+    return {
+        "fuselage": "#1f6f1f",
+        "wings": "#2f8f2f",
+        "engines": "#00ff66",
+        "canopy": "#4fa36d",
+        "status": "NOMINAL",
+    }
+
+
+def _aircraft_3d_figure(latest: pd.Series) -> go.Figure:
+    colors = _fault_color_map(str(latest["risk_level"]))
+    fig = go.Figure()
+
+    # Fuselage
+    fuselage_x = np.linspace(-3.5, 3.5, 60)
+    fuselage_y = np.zeros_like(fuselage_x)
+    fuselage_z = 0.02 * np.sin(np.linspace(0.0, 2.0 * np.pi, fuselage_x.size))
+    fig.add_trace(
+        go.Scatter3d(
+            x=fuselage_x,
+            y=fuselage_y,
+            z=fuselage_z,
+            mode="lines",
+            line=dict(color=colors["fuselage"], width=16),
+            name="Fuselage",
+            hovertemplate="Aircraft body<extra></extra>",
+        )
+    )
+
+    # Wings
+    wing_y = np.linspace(-2.6, 2.6, 40)
+    wing_x = np.full_like(wing_y, -0.2)
+    wing_z = np.zeros_like(wing_y)
+    fig.add_trace(
+        go.Scatter3d(
+            x=wing_x,
+            y=wing_y,
+            z=wing_z,
+            mode="lines",
+            line=dict(color=colors["wings"], width=12),
+            name="Wings",
+            hovertemplate="Wings<extra></extra>",
+        )
+    )
+
+    # Tailplane
+    tail_y = np.linspace(-1.3, 1.3, 20)
+    tail_x = np.full_like(tail_y, -2.6)
+    tail_z = np.full_like(tail_y, 0.5)
+    fig.add_trace(
+        go.Scatter3d(
+            x=tail_x,
+            y=tail_y,
+            z=tail_z,
+            mode="lines",
+            line=dict(color=colors["wings"], width=8),
+            name="Tail",
+            hovertemplate="Tail surface<extra></extra>",
+        )
+    )
+
+    # Vertical stabilizer
+    fig.add_trace(
+        go.Scatter3d(
+            x=[-2.7, -2.7],
+            y=[0.0, 0.0],
+            z=[0.0, 1.2],
+            mode="lines",
+            line=dict(color=colors["wings"], width=10),
+            name="Stabilizer",
+            hovertemplate="Vertical stabilizer<extra></extra>",
+        )
+    )
+
+    # Canopy
+    fig.add_trace(
+        go.Scatter3d(
+            x=[1.0, 1.2, 1.4],
+            y=[0.0, 0.0, 0.0],
+            z=[0.35, 0.5, 0.35],
+            mode="lines",
+            line=dict(color=colors["canopy"], width=10),
+            name="Canopy",
+            hovertemplate="Cockpit canopy<extra></extra>",
+        )
+    )
+
+    # Engines (fault-indicator color)
+    fig.add_trace(
+        go.Scatter3d(
+            x=[-0.9, -0.9],
+            y=[-0.52, 0.52],
+            z=[-0.22, -0.22],
+            mode="markers+text",
+            marker=dict(size=16, color=colors["engines"], symbol="circle"),
+            text=["L ENG", "R ENG"],
+            textposition="top center",
+            name="Engines",
+            hovertemplate="Engine status: " + colors["status"] + "<extra></extra>",
+        )
+    )
+
+    # Nose point
+    fig.add_trace(
+        go.Scatter3d(
+            x=[3.7],
+            y=[0.0],
+            z=[0.0],
+            mode="markers",
+            marker=dict(size=7, color="#b2ffd1"),
+            name="Nose",
+            hovertemplate="Nose<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        paper_bgcolor="black",
+        plot_bgcolor="black",
+        font=dict(color="#00ff66", family="Rajdhani"),
+        margin=dict(l=10, r=10, b=10, t=40),
+        scene=dict(
+            xaxis=dict(visible=False, backgroundcolor="black"),
+            yaxis=dict(visible=False, backgroundcolor="black"),
+            zaxis=dict(visible=False, backgroundcolor="black"),
+            bgcolor="black",
+            camera=dict(eye=dict(x=1.5, y=1.35, z=0.9)),
+            aspectmode="manual",
+            aspectratio=dict(x=2.2, y=1.5, z=0.8),
+        ),
+        legend=dict(font=dict(color="#00ff66"), orientation="h", y=1.02, x=0.01),
+        title="3D AIRCRAFT STATUS",
+    )
+    return fig
+
 # --------------------------------------------------
 # PAGE CONFIG
 # --------------------------------------------------
@@ -343,6 +495,22 @@ if "health_score" in data.columns or "sensor_health" in data.columns:
         h2.metric("SENSOR HEALTH", f"{latest['sensor_health'] * 100.0:.1f}%")
 
 st.info(interpretation)
+
+st.markdown("### AIRCRAFT DIGITAL TWIN")
+fault_colors = _fault_color_map(str(latest["risk_level"]))
+air_col1, air_col2 = st.columns([2, 1])
+
+with air_col1:
+    st.plotly_chart(_aircraft_3d_figure(latest), width="stretch")
+
+with air_col2:
+    st.metric("AIRCRAFT STATE", fault_colors["status"])
+    st.metric("FAULT LEVEL", str(latest["risk_level"]).upper())
+    st.metric("ENGINE VISUAL", "RED" if str(latest["risk_level"]) in {"Warning", "Critical"} else "GREEN")
+    st.caption(
+        "Engine nacelles turn red/orange during system faults. "
+        "Color is driven by live fault classification."
+    )
 
 st.markdown("#### LIVE FEATURE DATAFRAME")
 st.dataframe(
