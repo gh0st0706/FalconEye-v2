@@ -172,127 +172,157 @@ def _resolve_rafale_model_data_uri(uploaded_model) -> tuple[str | None, str | No
 
 def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: dict, enable_hand_tracking: bool) -> str:
     status = str(risk_level).upper()
-    viewer_module_path = APP_DIR / "assets" / "rafale-viewer.js"
-    viewer_module_source = viewer_module_path.read_text(encoding="utf-8") if viewer_module_path.exists() else ""
-
     return f"""
 <div id="rafale-wrap" style="width:100%;height:620px;position:relative;background:radial-gradient(circle at 20% 15%, #10161c, #05080b 55%);border:1px solid #00ff66;">
   <div style="position:absolute;top:10px;left:12px;color:#00ff66;font-family:Rajdhani,Segoe UI,sans-serif;letter-spacing:1px;z-index:10;">
     DASSAULT RAFALE // 3D MODEL // STATUS: {status}
   </div>
-  <div id="rafale-module-status" style="position:absolute;bottom:10px;left:12px;color:#8bd7a5;font-family:Rajdhani,Segoe UI,sans-serif;z-index:10;">
-    Initializing viewer module...
+  <div id="rafale-compat-status" style="position:absolute;bottom:10px;left:12px;color:#8bd7a5;font-family:Rajdhani,Segoe UI,sans-serif;z-index:10;">
+    Loading compatibility viewer...
   </div>
   <div id="rafale-viewer-root" style="position:absolute;inset:0;"></div>
 </div>
 
-<script type="module">
-const statusEl = document.getElementById("rafale-module-status");
-const rootEl = document.getElementById("rafale-viewer-root");
-const moduleSource = {json.dumps(viewer_module_source)};
-const modelUrl = {json.dumps(model_data_uri)};
-const anomalyPayload = {json.dumps(anomaly_payload)};
-const handTrackingEnabled = {"true" if enable_hand_tracking else "false"};
+<script src="https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.162.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.162.0/examples/js/loaders/GLTFLoader.js"></script>
+<script>
+(function() {{
+  const statusEl = document.getElementById("rafale-compat-status");
+  const rootEl = document.getElementById("rafale-viewer-root");
+  const modelUrl = {json.dumps(model_data_uri)};
+  const anomalyPayload = {json.dumps(anomaly_payload)};
 
-async function runFallbackViewer(reason) {{
-  statusEl.textContent = "Fallback viewer: " + reason;
-  try {{
-    const THREE = await import("https://esm.sh/three@0.162.0");
-    const {{ OrbitControls }} = await import("https://esm.sh/three@0.162.0/examples/jsm/controls/OrbitControls.js");
-    const {{ GLTFLoader }} = await import("https://esm.sh/three@0.162.0/examples/jsm/loaders/GLTFLoader.js");
+  if (!window.THREE || !THREE.OrbitControls || !THREE.GLTFLoader) {{
+    statusEl.textContent = "Three.js library failed to load";
+    return;
+  }}
 
-    rootEl.innerHTML = "";
-    const renderer = new THREE.WebGLRenderer({{ antialias: true, alpha: false }});
-    renderer.setSize(rootEl.clientWidth || 1024, rootEl.clientHeight || 620);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.setClearColor(0x06090d, 1);
-    rootEl.appendChild(renderer.domElement);
+  const renderer = new THREE.WebGLRenderer({{ antialias: true, alpha: false }});
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(rootEl.clientWidth || 1024, rootEl.clientHeight || 620);
+  renderer.setClearColor(0x06090d, 1);
+  rootEl.innerHTML = "";
+  rootEl.appendChild(renderer.domElement);
 
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(42, (rootEl.clientWidth || 1024) / (rootEl.clientHeight || 620), 0.01, 1000);
-    camera.position.set(10, 4, 10);
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.autoRotate = true;
-    controls.autoRotateSpeed = 0.5;
-    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-    const key = new THREE.DirectionalLight(0xffffff, 1.1);
-    key.position.set(12, 14, 10);
-    scene.add(key);
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(42, (rootEl.clientWidth || 1024) / (rootEl.clientHeight || 620), 0.01, 1000);
+  camera.position.set(10, 4, 10);
 
-    const loader = new GLTFLoader();
-    loader.load(
-      modelUrl,
-      (gltf) => {{
-        const model = gltf.scene || (gltf.scenes && gltf.scenes[0]);
-        if (!model) throw new Error("no-scene");
-        scene.add(model);
-        const box = new THREE.Box3().setFromObject(model);
-        const size = box.getSize(new THREE.Vector3());
-        const center = box.getCenter(new THREE.Vector3());
-        const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
-        model.scale.setScalar(8.0 / maxDim);
-        const sbox = new THREE.Box3().setFromObject(model);
-        model.position.sub(sbox.getCenter(new THREE.Vector3()));
-        controls.target.set(0, 0, 0);
-        statusEl.textContent = "Fallback viewer loaded";
-        statusEl.style.opacity = "0";
-        statusEl.style.transition = "opacity 300ms ease";
-      }},
-      undefined,
-      (err) => {{
-        console.error("Fallback GLTF load failed:", err);
-        statusEl.textContent = "Model load failed in fallback viewer";
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.06;
+  controls.autoRotate = true;
+  controls.autoRotateSpeed = 0.5;
+  controls.target.set(0, 0, 0);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const key = new THREE.DirectionalLight(0xffffff, 1.1);
+  key.position.set(12, 14, 10);
+  scene.add(key);
+  const fill = new THREE.DirectionalLight(0x88b8ff, 0.55);
+  fill.position.set(-10, 8, -6);
+  scene.add(fill);
+
+  function fitCameraToObject(obj) {{
+    const box = new THREE.Box3().setFromObject(obj);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
+    const fov = camera.fov * Math.PI / 180.0;
+    const dist = (maxDim * 0.5) / Math.tan(fov * 0.5) * 1.6;
+    camera.position.copy(center.clone().add(new THREE.Vector3(1.0, 0.35, 1.0).normalize().multiplyScalar(dist)));
+    camera.near = Math.max(0.01, maxDim / 200);
+    camera.far = Math.max(200, maxDim * 250);
+    camera.updateProjectionMatrix();
+    controls.target.copy(center);
+    controls.minDistance = maxDim * 0.2;
+    controls.maxDistance = maxDim * 20;
+    controls.update();
+  }}
+
+  function meshMatches(meshName, region) {{
+    const tokens = Array.isArray(region.tokens) ? region.tokens : [];
+    return tokens.some((t) => meshName.includes(String(t).toLowerCase()));
+  }}
+
+  const loader = new THREE.GLTFLoader();
+  loader.load(
+    modelUrl,
+    function(gltf) {{
+      const model = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+      if (!model) {{
+        statusEl.textContent = "GLB loaded but no scene found";
+        return;
       }}
-    );
 
-    const animate = () => {{
-      controls.update();
-      renderer.render(scene, camera);
-      requestAnimationFrame(animate);
-    }};
-    animate();
-  }} catch (fallbackErr) {{
-    console.error("Fallback viewer init failed:", fallbackErr);
-    statusEl.textContent = "Viewer failed: check browser console";
-  }}
-}}
+      const anomalyRegions = (anomalyPayload && anomalyPayload.regions) ? anomalyPayload.regions : [];
+      const red = new THREE.Color("#ff1a1a");
+      const hull = new THREE.Color("#95a29b");
 
-if (!moduleSource) {{
-  runFallbackViewer("module missing");
-}} else {{
-  const moduleUrl = URL.createObjectURL(new Blob([moduleSource], {{ type: "text/javascript" }}));
-  try {{
-    const mod = await import(moduleUrl);
-    const viewer = mod.createRafaleViewer({{
-      container: rootEl,
-      modelUrl,
-      skeletonEnabled: false,
-      skeletonColor: "#7fffb2",
-      skeletonSurfaceOpacity: 0.08,
-      skeletonLineOpacity: 0.95,
-      enableHandTracking: handTrackingEnabled,
-      debug: true,
-    }});
+      model.traverse(function(node) {{
+        if (!node.isMesh) return;
+        node.material = (node.material && node.material.clone) ? node.material.clone() : new THREE.MeshStandardMaterial();
+        node.material.side = THREE.DoubleSide;
+        node.material.metalness = Math.max(node.material.metalness || 0, 0.35);
+        node.material.roughness = Math.min(node.material.roughness || 0.8, 0.62);
+        if (node.material.color) node.material.color.lerp(hull, 0.25);
 
-    await viewer.load();
-    const regions = (anomalyPayload && anomalyPayload.regions) ? anomalyPayload.regions : [];
-    if (regions.length > 0) {{
-      viewer.highlightAnomalyRegions(regions, {{
-        color: "#ff1a1a",
-        intensity: 1.15,
-        surfaceOpacity: 0.62,
+        const meshName = (node.name || "").toLowerCase();
+        const hit = anomalyRegions.find((r) => meshMatches(meshName, r));
+        if (hit) {{
+          if (!node.material.emissive) node.material.emissive = red.clone();
+          node.material.emissive.copy(red);
+          node.material.emissiveIntensity = 1.05;
+          if (node.material.color) node.material.color.lerp(red, 0.55);
+        }}
       }});
+
+      scene.add(model);
+      const box = new THREE.Box3().setFromObject(model);
+      const maxDim = Math.max(box.getSize(new THREE.Vector3()).x, box.getSize(new THREE.Vector3()).y, box.getSize(new THREE.Vector3()).z, 1e-6);
+      model.scale.setScalar(8.0 / maxDim);
+      const sbox = new THREE.Box3().setFromObject(model);
+      model.position.sub(sbox.getCenter(new THREE.Vector3()));
+      fitCameraToObject(model);
+
+      statusEl.textContent = "Viewer loaded";
+      statusEl.style.opacity = "0";
+      statusEl.style.transition = "opacity 300ms ease";
+    }},
+    function(evt) {{
+      if (evt.total) {{
+        statusEl.textContent = "Loading model... " + Math.round((evt.loaded / evt.total) * 100) + "%";
+      }}
+    }},
+    function(err) {{
+      console.error("GLTF load error:", err);
+      statusEl.textContent = "Model load failed (see browser console)";
+      const fallback = new THREE.Mesh(
+        new THREE.BoxGeometry(2.8, 0.7, 0.8),
+        new THREE.MeshStandardMaterial({{ color: 0x7b8e9d, metalness: 0.5, roughness: 0.4 }})
+      );
+      scene.add(fallback);
+      fitCameraToObject(fallback);
     }}
-    statusEl.style.opacity = "0";
-    statusEl.style.transition = "opacity 300ms ease";
-  }} catch (err) {{
-    console.error("Failed to initialize rafale-viewer.js:", err);
-    await runFallbackViewer("module error");
-  }} finally {{
-    URL.revokeObjectURL(moduleUrl);
+  );
+
+  function onResize() {{
+    const w = rootEl.clientWidth || 1024;
+    const h = rootEl.clientHeight || 620;
+    renderer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
   }}
-}}
+  window.addEventListener("resize", onResize);
+
+  function animate() {{
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+  }}
+  animate();
+}})();
 </script>
 """
 
@@ -797,8 +827,7 @@ with air_col2:
         "(`engine`, `nozzle`, `turbine`, `exhaust`, etc.)."
     )
     st.caption(
-        "Hand gestures: move hand to rotate, pinch to zoom, victory sign toggles auto-rotate, "
-        "open palm resets orientation."
+        "Compatibility viewer mode enabled for reliable model rendering."
     )
 
 st.markdown("#### LIVE FEATURE DATAFRAME")
