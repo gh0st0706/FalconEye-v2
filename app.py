@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import streamlit.components.v1 as components
+import base64
+from pathlib import Path
 from engine import EngineStateModel
 from stream_processor import StreamingTelemetryProcessor, normalize_telemetry_frame
 
@@ -134,6 +137,211 @@ def _fault_color_map(risk_level: str) -> dict:
         "canopy": "#4fa36d",
         "status": "NOMINAL",
     }
+
+
+def _resolve_rafale_model_data_uri(uploaded_model) -> tuple[str | None, str | None]:
+    if uploaded_model is not None:
+        model_name = uploaded_model.name
+        model_bytes = uploaded_model.getvalue()
+        ext = Path(model_name).suffix.lower()
+        mime = "model/gltf-binary" if ext == ".glb" else "model/gltf+json"
+        encoded = base64.b64encode(model_bytes).decode("ascii")
+        return f"data:{mime};base64,{encoded}", model_name
+
+    local_candidates = [
+        Path("assets/rafale.glb"),
+        Path("assets/rafale.gltf"),
+        Path("models/rafale.glb"),
+        Path("models/rafale.gltf"),
+        Path("rafale.glb"),
+        Path("rafale.gltf"),
+    ]
+    for candidate in local_candidates:
+        if candidate.exists() and candidate.is_file():
+            model_bytes = candidate.read_bytes()
+            ext = candidate.suffix.lower()
+            mime = "model/gltf-binary" if ext == ".glb" else "model/gltf+json"
+            encoded = base64.b64encode(model_bytes).decode("ascii")
+            return f"data:{mime};base64,{encoded}", str(candidate)
+
+    return None, None
+
+
+def _threejs_rafale_html(model_data_uri: str, risk_level: str) -> str:
+    if risk_level == "Critical":
+        engine_color = "#ff1a1a"
+        hull_tint = "#75625f"
+        status = "CRITICAL"
+    elif risk_level == "Warning":
+        engine_color = "#ff4d00"
+        hull_tint = "#8d8a80"
+        status = "WARNING"
+    else:
+        engine_color = "#00ff66"
+        hull_tint = "#a1a8a3"
+        status = "NOMINAL"
+
+    html = """
+<div id="rafale-wrap" style="width:100%;height:620px;position:relative;background:radial-gradient(circle at 20% 15%, #10161c, #05080b 55%);border:1px solid #00ff66;">
+  <div style="position:absolute;top:10px;left:12px;color:#00ff66;font-family:Rajdhani,Segoe UI,sans-serif;letter-spacing:1px;z-index:10;">
+    DASSAULT RAFALE // 3D MODEL // STATUS: __STATUS__
+  </div>
+  <div style="position:absolute;bottom:10px;left:12px;color:#8bd7a5;font-family:Rajdhani,Segoe UI,sans-serif;z-index:10;">
+    Drag: rotate | Scroll: zoom | Fault state recolors engine sections
+  </div>
+  <canvas id="rafale-canvas" style="width:100%;height:100%;display:block;"></canvas>
+</div>
+
+<script type="module">
+import * as THREE from "https://unpkg.com/three@0.162.0/build/three.module.js";
+import { OrbitControls } from "https://unpkg.com/three@0.162.0/examples/jsm/controls/OrbitControls.js";
+import { GLTFLoader } from "https://unpkg.com/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
+
+const canvas = document.getElementById("rafale-canvas");
+const wrap = document.getElementById("rafale-wrap");
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x070b0f, 24, 75);
+
+const camera = new THREE.PerspectiveCamera(44, wrap.clientWidth / wrap.clientHeight, 0.1, 500);
+camera.position.set(8.0, 3.2, 8.0);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.55;
+controls.minDistance = 3;
+controls.maxDistance = 24;
+controls.target.set(0, 0, 0);
+controls.update();
+
+scene.add(new THREE.HemisphereLight(0xaec7ff, 0x101010, 0.9));
+const key = new THREE.DirectionalLight(0xffffff, 1.2);
+key.position.set(12, 16, 10);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0x83b6ff, 0.55);
+fill.position.set(-10, 8, -6);
+scene.add(fill);
+
+const deck = new THREE.Mesh(
+  new THREE.PlaneGeometry(120, 120),
+  new THREE.MeshStandardMaterial({ color: 0x0a0f14, roughness: 0.95, metalness: 0.02 })
+);
+deck.rotation.x = -Math.PI / 2;
+deck.position.y = -2.1;
+scene.add(deck);
+
+const modelUrl = "__MODEL_DATA_URI__";
+const engineColor = new THREE.Color("__ENGINE_COLOR__");
+const hullTint = new THREE.Color("__HULL_TINT__");
+const engineTokens = ["engine", "nozzle", "exhaust", "turbine", "afterburner"];
+
+const loader = new GLTFLoader();
+loader.load(
+  modelUrl,
+  (gltf) => {
+    const model = gltf.scene;
+    let engineHitCount = 0;
+    model.traverse((node) => {
+      if (!node.isMesh) return;
+      node.castShadow = true;
+      node.receiveShadow = true;
+      const cloneMat = node.material && node.material.clone ? node.material.clone() : new THREE.MeshStandardMaterial();
+      node.material = cloneMat;
+
+      if (node.material.color) {
+        node.material.color.lerp(hullTint, 0.22);
+      } else {
+        node.material.color = hullTint.clone();
+      }
+      if (typeof node.material.metalness === "number") node.material.metalness = Math.max(node.material.metalness, 0.35);
+      if (typeof node.material.roughness === "number") node.material.roughness = Math.min(node.material.roughness, 0.62);
+
+      const meshName = (node.name || "").toLowerCase();
+      const isEngineMesh = engineTokens.some((token) => meshName.includes(token));
+      if (isEngineMesh) {
+        node.material.emissive = engineColor.clone();
+        node.material.emissiveIntensity = 0.92;
+        node.material.color.lerp(engineColor, 0.35);
+        engineHitCount += 1;
+      }
+    });
+
+    const bbox = new THREE.Box3().setFromObject(model);
+    const size = bbox.getSize(new THREE.Vector3());
+    const center = bbox.getCenter(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const scale = 7.0 / (maxDim || 1.0);
+    model.scale.setScalar(scale);
+    model.position.sub(center.multiplyScalar(scale));
+    model.position.y -= 0.55;
+
+    if (engineHitCount === 0) {
+      const glowMat = new THREE.MeshStandardMaterial({
+        color: engineColor,
+        emissive: engineColor,
+        emissiveIntensity: 1.0,
+        roughness: 0.3,
+        metalness: 0.7
+      });
+      const s = size.multiplyScalar(scale);
+      const leftGlow = new THREE.Mesh(new THREE.SphereGeometry(0.18, 22, 16), glowMat);
+      const rightGlow = new THREE.Mesh(new THREE.SphereGeometry(0.18, 22, 16), glowMat.clone());
+      leftGlow.position.set(-s.x * 0.30, -s.y * 0.05, -s.z * 0.22);
+      rightGlow.position.set(-s.x * 0.30, -s.y * 0.05, s.z * 0.22);
+      model.add(leftGlow);
+      model.add(rightGlow);
+    }
+
+    scene.add(model);
+  },
+  undefined,
+  (err) => {
+    console.error("Failed to load GLB/GLTF model:", err);
+    const fallback = new THREE.Mesh(
+      new THREE.ConeGeometry(0.9, 3.8, 36),
+      new THREE.MeshStandardMaterial({ color: 0x7b8e9d, metalness: 0.6, roughness: 0.4 })
+    );
+    fallback.rotation.z = -Math.PI / 2;
+    scene.add(fallback);
+  }
+);
+
+const onResize = () => {
+  const w = wrap.clientWidth;
+  const h = wrap.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+};
+window.addEventListener("resize", onResize);
+
+const clock = new THREE.Clock();
+const animate = () => {
+  const t = clock.getElapsedTime();
+  deck.material.emissive = new THREE.Color(0x00ff66);
+  deck.material.emissiveIntensity = 0.02 + 0.01 * Math.sin(t * 1.8);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+};
+animate();
+</script>
+"""
+    return (
+        html.replace("__MODEL_DATA_URI__", model_data_uri)
+        .replace("__ENGINE_COLOR__", engine_color)
+        .replace("__HULL_TINT__", hull_tint)
+        .replace("__STATUS__", status)
+    )
 
 
 def _aircraft_3d_figure(latest: pd.Series) -> go.Figure:
@@ -407,6 +615,7 @@ st.markdown("<hr>", unsafe_allow_html=True)
 st.sidebar.header("MISSION PARAMETERS")
 
 uploaded_file = st.sidebar.file_uploader("Upload Telemetry CSV", type=["csv"])
+rafale_model_file = st.sidebar.file_uploader("Upload Rafale GLB/GLTF", type=["glb", "gltf"])
 stream_chunk = st.sidebar.slider("Real-time Chunk Size", 10, 250, 40)
 
 presets = {
@@ -562,17 +771,26 @@ st.info(interpretation)
 st.markdown("### AIRCRAFT DIGITAL TWIN")
 fault_colors = _fault_color_map(str(latest["risk_level"]))
 air_col1, air_col2 = st.columns([2, 1])
+model_data_uri, model_source = _resolve_rafale_model_data_uri(rafale_model_file)
 
 with air_col1:
-    st.plotly_chart(_aircraft_3d_figure(latest), width="stretch")
+    if model_data_uri:
+        components.html(_threejs_rafale_html(model_data_uri, str(latest["risk_level"])), height=620, scrolling=False)
+    else:
+        st.warning(
+            "Rafale model not found. Upload a `.glb`/`.gltf` in the sidebar or add "
+            "`assets/rafale.glb` to the project root."
+        )
+        st.plotly_chart(_aircraft_3d_figure(latest), width="stretch")
 
 with air_col2:
     st.metric("AIRCRAFT STATE", fault_colors["status"])
     st.metric("FAULT LEVEL", str(latest["risk_level"]).upper())
     st.metric("ENGINE VISUAL", "RED" if str(latest["risk_level"]) in {"Warning", "Critical"} else "GREEN")
+    st.metric("3D MODEL SOURCE", model_source if model_source else "SCHEMATIC FALLBACK")
     st.caption(
-        "Engine nacelles turn red/orange during system faults. "
-        "Color is driven by live fault classification."
+        "Three.js applies fault colors to engine meshes by name "
+        "(`engine`, `nozzle`, `exhaust`, `turbine`)."
     )
 
 st.markdown("#### LIVE FEATURE DATAFRAME")
