@@ -186,138 +186,171 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str) -> str:
   <div style="position:absolute;top:10px;left:12px;color:#00ff66;font-family:Rajdhani,Segoe UI,sans-serif;letter-spacing:1px;z-index:10;">
     DASSAULT RAFALE // 3D MODEL // STATUS: __STATUS__
   </div>
-  <div style="position:absolute;bottom:10px;left:12px;color:#8bd7a5;font-family:Rajdhani,Segoe UI,sans-serif;z-index:10;">
-    Drag: rotate | Scroll: zoom | Fault state recolors engine sections
+  <div id="rafale-progress" style="position:absolute;bottom:10px;left:12px;color:#8bd7a5;font-family:Rajdhani,Segoe UI,sans-serif;z-index:10;">
+    Loading 3D model...
   </div>
   <canvas id="rafale-canvas" style="width:100%;height:100%;display:block;"></canvas>
 </div>
 
 <script type="module">
-import * as THREE from "https://unpkg.com/three@0.162.0/build/three.module.js";
-import { OrbitControls } from "https://unpkg.com/three@0.162.0/examples/jsm/controls/OrbitControls.js";
-import { GLTFLoader } from "https://unpkg.com/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
+import * as THREE from "https://esm.sh/three@0.162.0";
+import { OrbitControls } from "https://esm.sh/three@0.162.0/examples/jsm/controls/OrbitControls.js";
+import { GLTFLoader } from "https://esm.sh/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
 
 const canvas = document.getElementById("rafale-canvas");
 const wrap = document.getElementById("rafale-wrap");
-
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-renderer.setSize(wrap.clientWidth, wrap.clientHeight);
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.1;
-
-const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x070b0f, 24, 75);
-
-const camera = new THREE.PerspectiveCamera(44, wrap.clientWidth / wrap.clientHeight, 0.1, 500);
-camera.position.set(8.0, 3.2, 8.0);
-
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.05;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 0.55;
-controls.minDistance = 3;
-controls.maxDistance = 24;
-controls.target.set(0, 0, 0);
-controls.update();
-
-scene.add(new THREE.HemisphereLight(0xaec7ff, 0x101010, 0.9));
-const key = new THREE.DirectionalLight(0xffffff, 1.2);
-key.position.set(12, 16, 10);
-scene.add(key);
-const fill = new THREE.DirectionalLight(0x83b6ff, 0.55);
-fill.position.set(-10, 8, -6);
-scene.add(fill);
-
-const deck = new THREE.Mesh(
-  new THREE.PlaneGeometry(120, 120),
-  new THREE.MeshStandardMaterial({ color: 0x0a0f14, roughness: 0.95, metalness: 0.02 })
-);
-deck.rotation.x = -Math.PI / 2;
-deck.position.y = -2.1;
-scene.add(deck);
-
+const progressEl = document.getElementById("rafale-progress");
 const modelUrl = "__MODEL_DATA_URI__";
 const engineColor = new THREE.Color("__ENGINE_COLOR__");
 const hullTint = new THREE.Color("__HULL_TINT__");
 const engineTokens = ["engine", "nozzle", "exhaust", "turbine", "afterburner"];
 
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(Math.max(1, wrap.clientWidth), Math.max(1, wrap.clientHeight));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+renderer.setClearColor(0x06090d, 1);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x070b0f, 35, 120);
+const camera = new THREE.PerspectiveCamera(
+  42,
+  Math.max(1, wrap.clientWidth) / Math.max(1, wrap.clientHeight),
+  0.01,
+  1000
+);
+camera.position.set(10, 4, 10);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.enablePan = true;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.5;
+controls.target.set(0, 0, 0);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const key = new THREE.DirectionalLight(0xffffff, 1.15);
+key.position.set(16, 18, 12);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0x88b8ff, 0.65);
+fill.position.set(-12, 8, -10);
+scene.add(fill);
+const rim = new THREE.DirectionalLight(0xaadfff, 0.45);
+rim.position.set(0, 6, -20);
+scene.add(rim);
+
+const deck = new THREE.Mesh(
+  new THREE.PlaneGeometry(400, 400),
+  new THREE.MeshStandardMaterial({ color: 0x0a0f14, roughness: 0.96, metalness: 0.02 })
+);
+deck.rotation.x = -Math.PI / 2;
+deck.position.y = -2.7;
+scene.add(deck);
+
+function fitCameraToBox(box) {
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z, 0.001);
+  const fov = (camera.fov * Math.PI) / 180.0;
+  const distance = (maxDim * 0.5) / Math.tan(fov * 0.5);
+  const finalDistance = distance * 1.55;
+  const direction = new THREE.Vector3(1.0, 0.38, 1.0).normalize();
+  const newPos = center.clone().add(direction.multiplyScalar(finalDistance));
+
+  camera.near = Math.max(0.01, maxDim / 200.0);
+  camera.far = Math.max(200.0, maxDim * 250.0);
+  camera.updateProjectionMatrix();
+  camera.position.copy(newPos);
+  controls.target.copy(center);
+  controls.minDistance = maxDim * 0.2;
+  controls.maxDistance = maxDim * 20.0;
+  controls.update();
+}
+
 const loader = new GLTFLoader();
 loader.load(
   modelUrl,
   (gltf) => {
-    const model = gltf.scene;
-    let engineHitCount = 0;
+    progressEl.textContent = "Model loaded";
+    const model = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+    if (!model) {
+      progressEl.textContent = "Load failed: no scene in model";
+      console.error("GLTF loaded but no scene found.");
+      return;
+    }
+
+    console.group("Rafale hierarchy");
     model.traverse((node) => {
+      console.log(node.type, node.name || "(unnamed)");
       if (!node.isMesh) return;
-      node.castShadow = true;
-      node.receiveShadow = true;
       const cloneMat = node.material && node.material.clone ? node.material.clone() : new THREE.MeshStandardMaterial();
       node.material = cloneMat;
-
-      if (node.material.color) {
-        node.material.color.lerp(hullTint, 0.22);
-      } else {
-        node.material.color = hullTint.clone();
-      }
+      node.castShadow = true;
+      node.receiveShadow = true;
+      if (node.material.color) node.material.color.lerp(hullTint, 0.22);
       if (typeof node.material.metalness === "number") node.material.metalness = Math.max(node.material.metalness, 0.35);
       if (typeof node.material.roughness === "number") node.material.roughness = Math.min(node.material.roughness, 0.62);
 
       const meshName = (node.name || "").toLowerCase();
-      const isEngineMesh = engineTokens.some((token) => meshName.includes(token));
-      if (isEngineMesh) {
-        node.material.emissive = engineColor.clone();
-        node.material.emissiveIntensity = 0.92;
-        node.material.color.lerp(engineColor, 0.35);
-        engineHitCount += 1;
+      if (engineTokens.some((token) => meshName.includes(token))) {
+        if (!node.material.emissive) node.material.emissive = engineColor.clone();
+        node.material.emissive.copy(engineColor);
+        node.material.emissiveIntensity = 0.9;
+        if (node.material.color) node.material.color.lerp(engineColor, 0.35);
       }
     });
+    console.groupEnd();
 
-    const bbox = new THREE.Box3().setFromObject(model);
-    const size = bbox.getSize(new THREE.Vector3());
-    const center = bbox.getCenter(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z);
-    const scale = 7.0 / (maxDim || 1.0);
+    // Normalize and center model.
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
+    const targetSpan = 8.0;
+    const scale = targetSpan / maxDim;
     model.scale.setScalar(scale);
-    model.position.sub(center.multiplyScalar(scale));
-    model.position.y -= 0.55;
 
-    if (engineHitCount === 0) {
-      const glowMat = new THREE.MeshStandardMaterial({
-        color: engineColor,
-        emissive: engineColor,
-        emissiveIntensity: 1.0,
-        roughness: 0.3,
-        metalness: 0.7
-      });
-      const s = size.multiplyScalar(scale);
-      const leftGlow = new THREE.Mesh(new THREE.SphereGeometry(0.18, 22, 16), glowMat);
-      const rightGlow = new THREE.Mesh(new THREE.SphereGeometry(0.18, 22, 16), glowMat.clone());
-      leftGlow.position.set(-s.x * 0.30, -s.y * 0.05, -s.z * 0.22);
-      rightGlow.position.set(-s.x * 0.30, -s.y * 0.05, s.z * 0.22);
-      model.add(leftGlow);
-      model.add(rightGlow);
-    }
+    const scaledBox = new THREE.Box3().setFromObject(model);
+    const scaledCenter = scaledBox.getCenter(new THREE.Vector3());
+    model.position.sub(scaledCenter);
+
+    const centeredBox = new THREE.Box3().setFromObject(model);
+    const centeredSize = centeredBox.getSize(new THREE.Vector3());
+    const centeredMinY = centeredBox.min.y;
+    model.position.y += -centeredMinY + centeredSize.y * 0.03;
 
     scene.add(model);
+    fitCameraToBox(new THREE.Box3().setFromObject(model));
+
+    progressEl.style.transition = "opacity 350ms ease";
+    setTimeout(() => { progressEl.style.opacity = "0.0"; }, 800);
   },
-  undefined,
+  (evt) => {
+    if (evt.total) {
+      progressEl.textContent = "Loading 3D model... " + Math.round((evt.loaded / evt.total) * 100) + "%";
+    } else {
+      progressEl.textContent = "Loading 3D model... " + Math.round(evt.loaded / 1024) + " KB";
+    }
+  },
   (err) => {
     console.error("Failed to load GLB/GLTF model:", err);
+    progressEl.textContent = "Load error: check browser console";
     const fallback = new THREE.Mesh(
       new THREE.ConeGeometry(0.9, 3.8, 36),
       new THREE.MeshStandardMaterial({ color: 0x7b8e9d, metalness: 0.6, roughness: 0.4 })
     );
     fallback.rotation.z = -Math.PI / 2;
     scene.add(fallback);
+    fitCameraToBox(new THREE.Box3().setFromObject(fallback));
   }
 );
 
 const onResize = () => {
-  const w = wrap.clientWidth;
-  const h = wrap.clientHeight;
+  const w = Math.max(1, wrap.clientWidth);
+  const h = Math.max(1, wrap.clientHeight);
   renderer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
@@ -328,7 +361,7 @@ const clock = new THREE.Clock();
 const animate = () => {
   const t = clock.getElapsedTime();
   deck.material.emissive = new THREE.Color(0x00ff66);
-  deck.material.emissiveIntensity = 0.02 + 0.01 * Math.sin(t * 1.8);
+  deck.material.emissiveIntensity = 0.012 + 0.008 * Math.sin(t * 1.4);
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(animate);

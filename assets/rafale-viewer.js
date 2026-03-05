@@ -25,7 +25,21 @@ import { OrbitControls } from "https://unpkg.com/three@0.162.0/examples/jsm/cont
 import { GLTFLoader } from "https://unpkg.com/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
 
 const DEFAULT_ENGINE_TOKENS = ["engine", "nozzle", "turbine", "exhaust", "afterburner"];
+loader.load(
+  "rafale.glb",
+  function (gltf) {
 
+    console.log("MODEL LOADED");
+    console.log(gltf);
+
+    scene.add(gltf.scene);
+
+  },
+  undefined,
+  function (error) {
+    console.error("MODEL FAILED", error);
+  }
+);
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
