@@ -51,6 +51,7 @@ export function createRafaleViewer(config) {
 
   const container = config.container;
   const modelUrl = config.modelUrl;
+  const engineModelUrl = config.engineModelUrl ?? null;
   const targetModelSpan = config.targetModelSpan ?? 8.0; // world units
   const debug = config.debug ?? true;
   const background = config.background ?? 0x06090d;
@@ -371,6 +372,85 @@ export function createRafaleViewer(config) {
       maxDim: Math.max(centeredSize.x, centeredSize.y, centeredSize.z),
       scale,
     };
+  }
+
+  async function loadGltfScene(loader, url) {
+    if (!url) return null;
+    const gltf = await new Promise((resolve, reject) => {
+      loader.load(url, (res) => resolve(res), undefined, (err) => reject(err));
+    });
+    return gltf.scene || gltf.scenes?.[0] || null;
+  }
+
+  function findWingAnchors(model) {
+    // Default offsets requested by user.
+    const fallback = {
+      left: new THREE.Vector3(-2.0, -0.5, 0.5),
+      right: new THREE.Vector3(2.0, -0.5, 0.5),
+    };
+
+    const wingCandidates = [];
+    model.traverse((obj) => {
+      if (!obj.isMesh) return;
+      const n = (obj.name || "").toLowerCase();
+      if (!n.includes("wing")) return;
+      const bb = new THREE.Box3().setFromObject(obj);
+      const c = bb.getCenter(new THREE.Vector3());
+      wingCandidates.push({ name: n, center: c });
+    });
+
+    if (wingCandidates.length === 0) return fallback;
+
+    const leftMatches = wingCandidates.filter((w) => w.name.includes("left") || w.name.includes("_l"));
+    const rightMatches = wingCandidates.filter((w) => w.name.includes("right") || w.name.includes("_r"));
+    const leftByPos = wingCandidates.filter((w) => w.center.x < 0).sort((a, b) => a.center.x - b.center.x);
+    const rightByPos = wingCandidates.filter((w) => w.center.x > 0).sort((a, b) => b.center.x - a.center.x);
+
+    const left = (leftMatches[0]?.center || leftByPos[0]?.center || fallback.left.clone()).clone();
+    const right = (rightMatches[0]?.center || rightByPos[0]?.center || fallback.right.clone()).clone();
+
+    // Move engines slightly below and forward of wing centers.
+    left.add(new THREE.Vector3(0.0, -0.35, 0.45));
+    right.add(new THREE.Vector3(0.0, -0.35, 0.45));
+    return { left, right };
+  }
+
+  async function attachTwinEngines(loader, model) {
+    const fallbackEngineUrl = config.defaultEngineModelUrl ?? "assets/turbofan.glb";
+    const template = await loadGltfScene(loader, engineModelUrl || fallbackEngineUrl);
+    if (!template) {
+      if (debug) console.warn("No engine model could be loaded; skipping engine mount.");
+      return false;
+    }
+
+    const anchors = findWingAnchors(model);
+    const aircraftBox = new THREE.Box3().setFromObject(model);
+    const aircraftSize = aircraftBox.getSize(new THREE.Vector3());
+    const aircraftMax = Math.max(aircraftSize.x, aircraftSize.y, aircraftSize.z, 1e-6);
+
+    const engineBox = new THREE.Box3().setFromObject(template);
+    const engineSize = engineBox.getSize(new THREE.Vector3());
+    const engineMax = Math.max(engineSize.x, engineSize.y, engineSize.z, 1e-6);
+    const engineScale = (aircraftMax * 0.14) / engineMax;
+
+    const leftEngine = template.clone(true);
+    const rightEngine = template.clone(true);
+    leftEngine.name = "engine_left";
+    rightEngine.name = "engine_right";
+
+    leftEngine.position.copy(anchors.left);
+    rightEngine.position.copy(anchors.right);
+    leftEngine.scale.setScalar(engineScale);
+    rightEngine.scale.setScalar(engineScale);
+
+    // Slight cant for under-wing mounting.
+    leftEngine.rotation.set(0.0, 0.0, 0.05);
+    rightEngine.rotation.set(0.0, 0.0, -0.05);
+
+    model.add(leftEngine);
+    model.add(rightEngine);
+    if (debug) console.log("Mounted twin engines:", leftEngine.name, rightEngine.name);
+    return true;
   }
 
   function fitCameraToModel(bounds, animate = false) {
@@ -696,7 +776,13 @@ export function createRafaleViewer(config) {
     rootGroup.clear();
     rootGroup.add(aircraft);
 
-    const bounds = normalizeModel(aircraft);
+    normalizeModel(aircraft);
+    try {
+      await attachTwinEngines(loader, aircraft);
+    } catch (engineErr) {
+      if (debug) console.warn("Engine attachment failed:", engineErr);
+    }
+    const bounds = { box: new THREE.Box3().setFromObject(aircraft) };
     baseModelRotation = new THREE.Euler(aircraft.rotation.x, aircraft.rotation.y, aircraft.rotation.z, "XYZ");
     interactionState.hasBaseline = false;
     interactionState.pausedByFist = false;

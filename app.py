@@ -170,7 +170,39 @@ def _resolve_rafale_model_data_uri(uploaded_model) -> tuple[str | None, str | No
     return None, None
 
 
-def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: dict, enable_hand_tracking: bool) -> str:
+def _resolve_turbofan_model_data_uri(uploaded_model) -> tuple[str | None, str | None]:
+    if uploaded_model is not None:
+        model_name = uploaded_model.name
+        model_bytes = uploaded_model.getvalue()
+        ext = Path(model_name).suffix.lower()
+        mime = "model/gltf-binary" if ext == ".glb" else "model/gltf+json"
+        encoded = base64.b64encode(model_bytes).decode("ascii")
+        return f"data:{mime};base64,{encoded}", model_name
+
+    local_candidates = [
+        APP_DIR / "assets" / "turbofan.glb",
+        APP_DIR / "assets" / "turbofan.gltf",
+        APP_DIR / "models" / "turbofan.glb",
+        APP_DIR / "models" / "turbofan.gltf",
+    ]
+    for candidate in local_candidates:
+        if candidate.exists() and candidate.is_file():
+            model_bytes = candidate.read_bytes()
+            ext = candidate.suffix.lower()
+            mime = "model/gltf-binary" if ext == ".glb" else "model/gltf+json"
+            encoded = base64.b64encode(model_bytes).decode("ascii")
+            return f"data:{mime};base64,{encoded}", str(candidate.relative_to(APP_DIR))
+
+    return None, None
+
+
+def _threejs_rafale_html(
+    model_data_uri: str,
+    engine_model_data_uri: str | None,
+    risk_level: str,
+    anomaly_payload: dict,
+    enable_hand_tracking: bool,
+) -> str:
     status = str(risk_level).upper()
     return f"""
 <div id="rafale-wrap" style="width:100%;height:620px;position:relative;background:radial-gradient(circle at 20% 15%, #10161c, #05080b 55%);border:1px solid #00ff66;">
@@ -188,6 +220,7 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
   const statusEl = document.getElementById("rafale-compat-status");
   const rootEl = document.getElementById("rafale-viewer-root");
   const modelUrl = {json.dumps(model_data_uri)};
+  const engineModelUrl = {json.dumps(engine_model_data_uri)};
   const anomalyPayload = {json.dumps(anomaly_payload)};
   const handTrackingEnabled = {"true" if enable_hand_tracking else "false"};
   const riskLevel = String((anomalyPayload && anomalyPayload.risk) || "normal").toLowerCase();
@@ -309,6 +342,73 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
   function meshMatches(meshName, region) {{
     const tokens = Array.isArray(region.tokens) ? region.tokens : [];
     return tokens.some((t) => meshName.includes(String(t).toLowerCase()));
+  }}
+
+  function findWingAnchors(model) {{
+    const fallback = {{
+      left: new THREE.Vector3(-2.0, -0.5, 0.5),
+      right: new THREE.Vector3(2.0, -0.5, 0.5),
+    }};
+    const candidates = [];
+    model.traverse(function(node) {{
+      if (!node.isMesh) return;
+      const n = (node.name || "").toLowerCase();
+      if (!n.includes("wing")) return;
+      const bb = new THREE.Box3().setFromObject(node);
+      candidates.push({{ name: n, center: bb.getCenter(new THREE.Vector3()) }});
+    }});
+    if (candidates.length === 0) return fallback;
+    const left = candidates.find((c) => c.name.includes("left") || c.center.x < 0) || null;
+    const right = candidates.find((c) => c.name.includes("right") || c.center.x > 0) || null;
+    return {{
+      left: (left ? left.center.clone() : fallback.left.clone()).add(new THREE.Vector3(0.0, -0.35, 0.45)),
+      right: (right ? right.center.clone() : fallback.right.clone()).add(new THREE.Vector3(0.0, -0.35, 0.45)),
+    }};
+  }}
+
+  function mountTwinEngines(loader, model, done) {{
+    if (!engineModelUrl) {{
+      done(false);
+      return;
+    }}
+    loader.load(
+      engineModelUrl,
+      function(engineGltf) {{
+        const template = engineGltf.scene || (engineGltf.scenes && engineGltf.scenes[0]);
+        if (!template) {{
+          done(false);
+          return;
+        }}
+        const anchors = findWingAnchors(model);
+        const aircraftBox = new THREE.Box3().setFromObject(model);
+        const aircraftSize = aircraftBox.getSize(new THREE.Vector3());
+        const aircraftMax = Math.max(aircraftSize.x, aircraftSize.y, aircraftSize.z, 1e-6);
+
+        const engineBox = new THREE.Box3().setFromObject(template);
+        const engineSize = engineBox.getSize(new THREE.Vector3());
+        const engineMax = Math.max(engineSize.x, engineSize.y, engineSize.z, 1e-6);
+        const engineScale = (aircraftMax * 0.14) / engineMax;
+
+        const leftEngine = template.clone(true);
+        const rightEngine = template.clone(true);
+        leftEngine.name = "engine_left";
+        rightEngine.name = "engine_right";
+        leftEngine.position.copy(anchors.left);
+        rightEngine.position.copy(anchors.right);
+        leftEngine.scale.setScalar(engineScale);
+        rightEngine.scale.setScalar(engineScale);
+        leftEngine.rotation.z = 0.05;
+        rightEngine.rotation.z = -0.05;
+        model.add(leftEngine);
+        model.add(rightEngine);
+        done(true);
+      }},
+      undefined,
+      function(err) {{
+        console.warn("Engine model load failed:", err);
+        done(false);
+      }}
+    );
   }}
 
   function vComp(v, idx) {{
@@ -614,13 +714,17 @@ def _threejs_rafale_html(model_data_uri: str, risk_level: str, anomaly_payload: 
       model.scale.setScalar(8.0 / maxDim);
       const sbox = new THREE.Box3().setFromObject(model);
       model.position.sub(sbox.getCenter(new THREE.Vector3()));
-      fitCameraToObject(model);
-      trackedModel = model;
-      baseRotation.x = model.rotation.x;
-      baseRotation.y = model.rotation.y;
-      baseRotation.z = model.rotation.z;
-      statusEl.textContent = handTrackingEnabled ? "Viewer loaded (starting hand tracking...)" : "Viewer loaded";
-      initHandTracking();
+      mountTwinEngines(loader, model, function(attached) {{
+        fitCameraToObject(model);
+        trackedModel = model;
+        baseRotation.x = model.rotation.x;
+        baseRotation.y = model.rotation.y;
+        baseRotation.z = model.rotation.z;
+        statusEl.textContent = handTrackingEnabled
+          ? "Viewer loaded (starting hand tracking...)"
+          : "Viewer loaded" + (attached ? " + twin engines mounted" : "");
+        initHandTracking();
+      }});
     }},
     function(evt) {{
       if (evt.total) {{
@@ -1012,6 +1116,7 @@ st.sidebar.header("MISSION PARAMETERS")
 
 uploaded_file = st.sidebar.file_uploader("Upload Telemetry CSV", type=["csv"])
 rafale_model_file = st.sidebar.file_uploader("Upload Rafale GLB/GLTF", type=["glb", "gltf"])
+turbofan_model_file = st.sidebar.file_uploader("Upload Turbofan GLB/GLTF (Optional)", type=["glb", "gltf"])
 enable_hand_tracking = st.sidebar.checkbox("Enable Hand Tracking (MediaPipe)", value=True)
 stream_chunk = st.sidebar.slider("Real-time Chunk Size", 10, 250, 40)
 
@@ -1169,12 +1274,19 @@ st.markdown("### AIRCRAFT DIGITAL TWIN")
 fault_colors = _fault_color_map(str(latest["risk_level"]))
 air_col1, air_col2 = st.columns([2, 1])
 model_data_uri, model_source = _resolve_rafale_model_data_uri(rafale_model_file)
+engine_model_data_uri, engine_model_source = _resolve_turbofan_model_data_uri(turbofan_model_file)
 anomaly_payload = _anomaly_regions(latest)
 
 with air_col1:
     if model_data_uri:
         components.html(
-            _threejs_rafale_html(model_data_uri, str(latest["risk_level"]), anomaly_payload, enable_hand_tracking),
+            _threejs_rafale_html(
+                model_data_uri,
+                engine_model_data_uri,
+                str(latest["risk_level"]),
+                anomaly_payload,
+                enable_hand_tracking,
+            ),
             height=620,
             scrolling=False,
         )
@@ -1190,6 +1302,7 @@ with air_col2:
     st.metric("FAULT LEVEL", str(latest["risk_level"]).upper())
     st.metric("ENGINE VISUAL", "RED" if str(latest["risk_level"]) in {"Warning", "Critical"} else "GREEN")
     st.metric("3D MODEL SOURCE", model_source if model_source else "SCHEMATIC FALLBACK")
+    st.metric("ENGINE MODEL SOURCE", engine_model_source if engine_model_source else "NONE")
     active_regions = ", ".join([region["label"] for region in anomaly_payload["regions"]]) if anomaly_payload["regions"] else "NONE"
     st.metric("ANOMALY REGIONS", active_regions)
     st.caption(
