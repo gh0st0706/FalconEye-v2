@@ -303,6 +303,10 @@ def _threejs_rafale_html(
   controls.target.set(0, 0, 0);
 
   let trackedModel = null;
+  let interactionSphere = null;
+  let interactionSphereBaseOpacity = 0.30;
+  let interactionSphereActive = false;
+  let lastHandSeenAt = 0;
   const baseRotation = {{ x: 0, y: 0, z: 0 }};
   const desiredRotation = {{ x: 0, y: 0, z: 0 }};
   let handPaused = false;
@@ -346,6 +350,68 @@ def _threejs_rafale_html(
   function meshMatches(meshName, region) {{
     const tokens = Array.isArray(region.tokens) ? region.tokens : [];
     return tokens.some((t) => meshName.includes(String(t).toLowerCase()));
+  }}
+
+  function createInteractionSphere(model) {{
+    const bbox = new THREE.Box3().setFromObject(model);
+    const size = bbox.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
+    const radiusLocal = Math.max(3.0, maxDim * 0.38);
+
+    const sphereGeo = new THREE.SphereGeometry(radiusLocal, 36, 24);
+    const sphereMat = new THREE.MeshBasicMaterial({{
+      color: 0x00ffff,
+      wireframe: true,
+      transparent: true,
+      opacity: interactionSphereBaseOpacity,
+    }});
+    const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+    sphere.name = "interaction_sphere";
+    sphere.userData.radiusLocal = radiusLocal;
+    sphere.userData.baseOpacity = interactionSphereBaseOpacity;
+    sphere.position.set(0, 0, 0);
+    model.add(sphere);
+    return sphere;
+  }}
+
+  function estimatePalmWorldPosition(lm) {{
+    // MediaPipe [0..1] -> NDC.
+    const ndcX = lm[9].x * 2.0 - 1.0;
+    const ndcY = -(lm[9].y * 2.0 - 1.0);
+    const rayPoint = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(camera);
+    const rayDir = rayPoint.sub(camera.position).normalize();
+    const baseDepth = camera.position.distanceTo(controls.target) * 0.60;
+    const zAdj = (lm[9].z || 0) * 8.0;
+    const depth = THREE.MathUtils.clamp(baseDepth + zAdj, 2.0, 45.0);
+    return camera.position.clone().add(rayDir.multiplyScalar(depth));
+  }}
+
+  function updateInteractionGate(handLandmarks) {{
+    if (!trackedModel || !interactionSphere || !handLandmarks || handLandmarks.length === 0) {{
+      interactionSphereActive = false;
+      return false;
+    }}
+    const sphereCenter = new THREE.Vector3();
+    interactionSphere.getWorldPosition(sphereCenter);
+    const worldScale = new THREE.Vector3();
+    trackedModel.getWorldScale(worldScale);
+    const sphereRadiusWorld = (interactionSphere.userData.radiusLocal || 3.0) * worldScale.x;
+
+    let active = false;
+    for (const lm of handLandmarks) {{
+      const palmWorld = estimatePalmWorldPosition(lm);
+      const dist = palmWorld.distanceTo(sphereCenter);
+      if (dist < sphereRadiusWorld) {{
+        active = true;
+        break;
+      }}
+    }}
+    interactionSphereActive = active;
+
+    if (interactionSphere.material && interactionSphere.material.color) {{
+      interactionSphere.material.color.set(active ? 0x00ff66 : 0x00ffff);
+    }}
+    return active;
   }}
 
   function findWingAnchors(model) {{
@@ -565,6 +631,13 @@ def _threejs_rafale_html(
       if (!trackedModel || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
       const handLandmarks = results.multiHandLandmarks.filter((lm) => lm && lm.length >= 21);
       if (handLandmarks.length === 0) return;
+      lastHandSeenAt = performance.now();
+
+      const inSphere = updateInteractionGate(handLandmarks);
+      if (!inSphere) {{
+        statusEl.textContent = "Hand outside interaction sphere";
+        return;
+      }}
 
       const anyFist = handLandmarks.some((lm) => detectFist(lm));
       if (anyFist && !handPaused) {{
@@ -743,6 +816,7 @@ def _threejs_rafale_html(
       mountTwinEngines(loader, model, function(attached) {{
         fitCameraToObject(model);
         trackedModel = model;
+        interactionSphere = createInteractionSphere(model);
         baseRotation.x = model.rotation.x;
         baseRotation.y = model.rotation.y;
         baseRotation.z = model.rotation.z;
@@ -779,6 +853,24 @@ def _threejs_rafale_html(
   window.addEventListener("resize", onResize);
 
   function animate() {{
+    if (performance.now() - lastHandSeenAt > 320) {{
+      interactionSphereActive = false;
+      if (interactionSphere && interactionSphere.material && interactionSphere.material.color) {{
+        interactionSphere.material.color.set(0x00ffff);
+      }}
+    }}
+    if (interactionSphere) {{
+      interactionSphere.rotation.y += 0.006;
+      interactionSphere.rotation.x += 0.002;
+      const t = performance.now() * 0.002;
+      const pulseBase = interactionSphere.userData.baseOpacity || 0.30;
+      const pulseAmp = interactionSphereActive ? 0.10 : 0.04;
+      interactionSphere.material.opacity = THREE.MathUtils.clamp(
+        pulseBase + pulseAmp * Math.sin(t),
+        0.22,
+        0.42
+      );
+    }}
     if (trackedModel && handTrackingEnabled && !handPaused) {{
       trackedModel.rotation.x = THREE.MathUtils.lerp(trackedModel.rotation.x, baseRotation.x + desiredRotation.x, 0.24);
       trackedModel.rotation.y = THREE.MathUtils.lerp(trackedModel.rotation.y, baseRotation.y + desiredRotation.y, 0.24);
