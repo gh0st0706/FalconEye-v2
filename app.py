@@ -311,6 +311,10 @@ def _threejs_rafale_html(
   let lastPalmY = null;
   let lastPalmZ = null;
   let lastPalmTwist = null;
+  let lastTwoCenterX = null;
+  let lastTwoCenterY = null;
+  let lastTwoDepth = null;
+  let lastTwoAngle = null;
   const zoomDeadband = 0.004;
   const zoomGain = 95.0;
 
@@ -551,7 +555,7 @@ def _threejs_rafale_html(
       locateFile: (file) => "https://cdn.jsdelivr.net/npm/@mediapipe/hands/" + file
     }});
     hands.setOptions({{
-      maxNumHands: 1,
+      maxNumHands: 2,
       modelComplexity: 1,
       minDetectionConfidence: 0.65,
       minTrackingConfidence: 0.6
@@ -559,72 +563,94 @@ def _threejs_rafale_html(
 
     hands.onResults((results) => {{
       if (!trackedModel || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
-      const lm = results.multiHandLandmarks[0];
-      if (!lm || lm.length < 21) return;
+      const handLandmarks = results.multiHandLandmarks.filter((lm) => lm && lm.length >= 21);
+      if (handLandmarks.length === 0) return;
 
-      const isFistNow = detectFist(lm);
-      if (isFistNow && !handPaused) {{
+      const anyFist = handLandmarks.some((lm) => detectFist(lm));
+      if (anyFist && !handPaused) {{
         handPaused = true;
         lastHandOpen = null;
+        lastTwoCenterX = null;
+        lastTwoCenterY = null;
+        lastTwoDepth = null;
+        lastTwoAngle = null;
         statusEl.textContent = "Tracking paused (fist)";
         return;
       }}
       if (handPaused) {{
-        if (detectOpenPalm(lm)) {{
+        if (handLandmarks.some((lm) => detectOpenPalm(lm))) {{
           handPaused = false;
           lastHandOpen = null;
           lastPalmX = null;
           lastPalmY = null;
           lastPalmZ = null;
           lastPalmTwist = null;
+          lastTwoCenterX = null;
+          lastTwoCenterY = null;
+          lastTwoDepth = null;
+          lastTwoAngle = null;
           statusEl.textContent = "Tracking resumed";
         }}
         return;
       }}
 
-      // Zoom by closing/opening fist (open->close zoom in, close->open zoom out).
-      const openNow = handOpenMetric(lm);
-      if (lastHandOpen !== null) {{
-        const openDelta = openNow - lastHandOpen;
-        if (Math.abs(openDelta) > zoomDeadband) {{
-          const toCam = camera.position.clone().sub(controls.target).normalize();
-          const cur = camera.position.distanceTo(controls.target);
-          const next = THREE.MathUtils.clamp(cur - openDelta * zoomGain, 4.5, 26.0);
-          camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(next)));
-          statusEl.textContent = openDelta < 0 ? "Fist closing: zoom in" : "Hand opening: zoom out";
+      // Mode A: one hand = zoom only (no rotation updates).
+      if (handLandmarks.length === 1) {{
+        const lm = handLandmarks[0];
+        const openNow = handOpenMetric(lm);
+        if (lastHandOpen !== null) {{
+          const openDelta = openNow - lastHandOpen;
+          if (Math.abs(openDelta) > zoomDeadband) {{
+            const toCam = camera.position.clone().sub(controls.target).normalize();
+            const cur = camera.position.distanceTo(controls.target);
+            const next = THREE.MathUtils.clamp(cur - openDelta * zoomGain, 4.5, 26.0);
+            camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(next)));
+            statusEl.textContent = openDelta < 0 ? "One-hand zoom in" : "One-hand zoom out";
+          }} else {{
+            statusEl.textContent = "One-hand zoom mode";
+          }}
         }}
-      }}
-      lastHandOpen = openNow;
+        lastHandOpen = openNow;
 
-      const cx = lm[9].x;
-      const cy = lm[9].y;
-      const cz = lm[9].z || 0;
-      const palmTwist = Math.atan2(lm[5].y - lm[17].y, lm[5].x - lm[17].x);
-      const ballHold = isBallHoldGesture(lm, isFistNow);
-
-      if (ballHold) {{
-        if (lastPalmX !== null && lastPalmY !== null) {{
-          const dx = cx - lastPalmX;
-          const dy = cy - lastPalmY;
-          const dz = cz - lastPalmZ;
-          desiredRotation.y = THREE.MathUtils.clamp(desiredRotation.y - dx * 8.8, -1.20, 1.20);
-          desiredRotation.x = THREE.MathUtils.clamp(desiredRotation.x - dy * 8.2 - dz * 2.3, -0.85, 0.85);
-        }}
-        if (lastPalmTwist !== null) {{
-          const dTwist = wrapAngleDelta(palmTwist - lastPalmTwist);
-          desiredRotation.z = THREE.MathUtils.clamp(desiredRotation.z + dTwist * 2.0, -1.05, 1.05);
-        }}
-      }} else {{
-        // Fallback absolute mapping if hand isn't in the "ball hold" shape.
-        desiredRotation.y = THREE.MathUtils.clamp((cx - 0.5) * -2.9, -1.20, 1.20);
-        desiredRotation.x = THREE.MathUtils.clamp((0.5 - cy) * 2.5, -0.85, 0.85);
-        desiredRotation.z = THREE.MathUtils.clamp(palmTwist * 1.05, -1.05, 1.05);
+        // Reset two-hand rotation deltas to avoid jumps when second hand appears.
+        lastTwoCenterX = null;
+        lastTwoCenterY = null;
+        lastTwoDepth = null;
+        lastTwoAngle = null;
+        lastPalmX = null;
+        lastPalmY = null;
+        lastPalmZ = null;
+        lastPalmTwist = null;
+        return;
       }}
 
-      lastPalmX = cx;
-      lastPalmY = cy;
-      lastPalmZ = cz;
-      lastPalmTwist = palmTwist;
+      // Mode B: two hands = grab-and-rotate only.
+      const sorted = handLandmarks.slice().sort((a, b) => a[9].x - b[9].x);
+      const left = sorted[0];
+      const right = sorted[1];
+      const cx = (left[9].x + right[9].x) * 0.5;
+      const cy = (left[9].y + right[9].y) * 0.5;
+      const cz = ((left[9].z || 0) + (right[9].z || 0)) * 0.5;
+      const lineAngle = Math.atan2(right[9].y - left[9].y, right[9].x - left[9].x);
+
+      if (lastTwoCenterX !== null && lastTwoCenterY !== null) {{
+        const dx = cx - lastTwoCenterX;
+        const dy = cy - lastTwoCenterY;
+        const dz = cz - lastTwoDepth;
+        desiredRotation.y = THREE.MathUtils.clamp(desiredRotation.y - dx * 7.8, -1.20, 1.20);
+        desiredRotation.x = THREE.MathUtils.clamp(desiredRotation.x - dy * 7.4 - dz * 2.0, -0.85, 0.85);
+      }}
+      if (lastTwoAngle !== null) {{
+        const dA = wrapAngleDelta(lineAngle - lastTwoAngle);
+        desiredRotation.z = THREE.MathUtils.clamp(desiredRotation.z + dA * 1.9, -1.05, 1.05);
+      }}
+
+      lastTwoCenterX = cx;
+      lastTwoCenterY = cy;
+      lastTwoDepth = cz;
+      lastTwoAngle = lineAngle;
+      lastHandOpen = null;
+      statusEl.textContent = "Two-hand grab rotate mode";
     }});
 
     const video = document.createElement("video");
