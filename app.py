@@ -416,16 +416,25 @@ def _threejs_rafale_html(
   }}
 
   function detectSnapGesture(lm, key) {{
-    const state = snapState[key] || {{ wasPinched: false, lastMx: lm[12].x, lastMy: lm[12].y }};
-    const thumbMiddle = pointDist(lm[4], lm[12]);
-    const thumbIndex = pointDist(lm[4], lm[8]);
-    const pinchNow = (thumbMiddle < 0.055 && thumbIndex < 0.090);
-    const middleSpeed = Math.hypot(lm[12].x - state.lastMx, lm[12].y - state.lastMy);
-    const indexExtended = lm[8].y < lm[6].y;
-    const snap = state.wasPinched && !pinchNow && thumbMiddle > 0.090 && middleSpeed > 0.024 && indexExtended;
-    state.wasPinched = pinchNow;
-    state.lastMx = lm[12].x;
-    state.lastMy = lm[12].y;
+    const state = snapState[key] || {{
+      holdFrames: 0,
+    }};
+
+    const indexUp = lm[8].y < lm[6].y;
+    const middleUp = lm[12].y < lm[10].y;
+    const ringDown = lm[16].y > lm[14].y;
+    const pinkyDown = lm[20].y > lm[18].y;
+    const vSpread = Math.abs(lm[8].x - lm[12].x);
+    const isVSign = indexUp && middleUp && ringDown && pinkyDown && vSpread > 0.05;
+
+    if (isVSign) {{
+      state.holdFrames += 1;
+    }} else {{
+      state.holdFrames = 0;
+    }}
+
+    const snap = state.holdFrames >= 8; // ~250ms stable hold at typical camera FPS
+    if (snap) state.holdFrames = 0;
     snapState[key] = state;
     return snap;
   }}
@@ -787,6 +796,7 @@ def _threejs_rafale_html(
             : ("hand_" + i);
           if (detectSnapGesture(lm, handInfo)) {{
             snapCooldownFrames = 36;
+            statusEl.textContent = "Tour gesture detected (V-sign)";
             startAnomalyTour();
             return;
           }}
