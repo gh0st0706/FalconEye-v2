@@ -351,9 +351,24 @@ def _threejs_rafale_html(
     controls.update();
   }}
 
-  function meshMatches(meshName, region) {{
+  function getMeshSearchText(node) {{
+    const names = [];
+    let cur = node;
+    let hops = 0;
+    while (cur && hops < 5) {{
+      if (cur.name) names.push(String(cur.name).toLowerCase());
+      cur = cur.parent;
+      hops += 1;
+    }}
+    return names.join("|");
+  }}
+
+  function meshMatches(searchText, region) {{
     const tokens = Array.isArray(region.tokens) ? region.tokens : [];
-    return tokens.some((t) => meshName.includes(String(t).toLowerCase()));
+    return tokens.some((t) => {{
+      const token = String(t).toLowerCase();
+      return searchText.includes(token);
+    }});
   }}
 
 
@@ -750,7 +765,36 @@ def _threejs_rafale_html(
       const hull = new THREE.Color("#95a29b");
       const engineTokens = ["engine", "nozzle", "turbine", "exhaust", "afterburner"];
       const engineMeshSet = inferEngineMeshes(model, engineTokens);
+      const regionStyles = {{
+        thermal: {{ color: new THREE.Color("#ff1a1a"), emissive: 1.12, opacity: 0.66, edgeOpacity: 1.0 }},
+        vibration: {{ color: new THREE.Color("#ff8c1a"), emissive: 1.0, opacity: 0.60, edgeOpacity: 0.98 }},
+        efficiency: {{ color: new THREE.Color("#ffd84d"), emissive: 0.92, opacity: 0.56, edgeOpacity: 0.96 }},
+        general: {{ color: new THREE.Color("#ff3b3b"), emissive: 1.05, opacity: 0.62, edgeOpacity: 1.0 }},
+      }};
+      const warningEngineStyle = {{ color: new THREE.Color("#ff1a1a"), emissive: 1.0, opacity: 0.55, edgeOpacity: 1.0 }};
 
+      function normalizeRegionKey(label) {{
+        const s = String(label || "").toLowerCase();
+        if (s.includes("thermal") || s.includes("temp")) return "thermal";
+        if (s.includes("vibration")) return "vibration";
+        if (s.includes("efficiency")) return "efficiency";
+        return "general";
+      }}
+
+      function getRegionStyle(region) {{
+        const key = normalizeRegionKey(region?.label);
+        const base = regionStyles[key] || regionStyles.general;
+        const sev = String(region?.severity || riskLevel || "warning").toLowerCase();
+        const mul = sev === "critical" ? 1.18 : 1.0;
+        return {{
+          color: base.color.clone(),
+          emissive: base.emissive * mul,
+          opacity: Math.min(0.75, base.opacity + (sev === "critical" ? 0.06 : 0.0)),
+          edgeOpacity: Math.min(1.0, base.edgeOpacity + (sev === "critical" ? 0.03 : 0.0)),
+        }};
+      }}
+
+      let totalDirectMatches = 0;
       model.traverse(function(node) {{
         if (!node.isMesh) return;
         node.material = (node.material && node.material.clone) ? node.material.clone() : new THREE.MeshStandardMaterial();
@@ -762,36 +806,52 @@ def _threejs_rafale_html(
         node.material.opacity = 0.08;
         node.material.depthWrite = false;
 
-        const meshName = (node.name || "").toLowerCase();
-        const hit = anomalyRegions.find((r) => meshMatches(meshName, r));
+        const searchText = getMeshSearchText(node);
+        const hit = anomalyRegions.find((r) => meshMatches(searchText, r));
         const isEngineMesh = engineMeshSet.has(node);
         const engineWarning = isEngineMesh && (riskLevel === "warning" || riskLevel === "critical");
+        const style = hit ? getRegionStyle(hit) : (engineWarning ? warningEngineStyle : null);
         if (hit) {{
-          if (!node.material.emissive) node.material.emissive = red.clone();
-          node.material.emissive.copy(red);
-          node.material.emissiveIntensity = 1.05;
-          if (node.material.color) node.material.color.lerp(red, 0.55);
-          node.material.opacity = 0.62;
+          totalDirectMatches += 1;
+          if (!node.material.emissive) node.material.emissive = style.color.clone();
+          node.material.emissive.copy(style.color);
+          node.material.emissiveIntensity = style.emissive;
+          if (node.material.color) node.material.color.lerp(style.color, 0.58);
+          node.material.opacity = style.opacity;
           node.material.depthWrite = true;
         }} else if (engineWarning) {{
-          if (!node.material.emissive) node.material.emissive = red.clone();
-          node.material.emissive.copy(red);
-          node.material.emissiveIntensity = 1.0;
-          if (node.material.color) node.material.color.lerp(red, 0.45);
-          node.material.opacity = 0.55;
+          if (!node.material.emissive) node.material.emissive = style.color.clone();
+          node.material.emissive.copy(style.color);
+          node.material.emissiveIntensity = style.emissive;
+          if (node.material.color) node.material.color.lerp(style.color, 0.45);
+          node.material.opacity = style.opacity;
           node.material.depthWrite = true;
         }}
 
         const edges = new THREE.EdgesGeometry(node.geometry, 18);
         const edgeMat = new THREE.LineBasicMaterial({{
-          color: (hit || engineWarning) ? red : new THREE.Color("#7fffb2"),
+          color: style ? style.color : new THREE.Color("#7fffb2"),
           transparent: true,
-          opacity: (hit || engineWarning) ? 1.0 : 0.95
+          opacity: style ? style.edgeOpacity : 0.95
         }});
         const lines = new THREE.LineSegments(edges, edgeMat);
         lines.renderOrder = 2;
         node.add(lines);
       }});
+
+      // Fallback: if no token match occurred but risk is elevated, force-highlight inferred engine meshes.
+      if (totalDirectMatches === 0 && (riskLevel === "warning" || riskLevel === "critical")) {{
+        for (const node of engineMeshSet) {{
+          if (!node || !node.isMesh || !node.material) continue;
+          if (!node.material.emissive) node.material.emissive = warningEngineStyle.color.clone();
+          node.material.emissive.copy(warningEngineStyle.color);
+          node.material.emissiveIntensity = warningEngineStyle.emissive;
+          if (node.material.color) node.material.color.lerp(warningEngineStyle.color, 0.45);
+          node.material.transparent = true;
+          node.material.opacity = warningEngineStyle.opacity;
+          node.material.depthWrite = true;
+        }}
+      }}
 
       scene.add(model);
       const box = new THREE.Box3().setFromObject(model);
@@ -866,35 +926,48 @@ def _anomaly_regions(latest: pd.Series) -> dict:
 
     regions = []
     if risk in {"warning", "critical"}:
-        if "temp_deviation" in reason or "temp_deviation" in reason_code:
+        signal = f"{reason} {reason_code}"
+        common_engine_tokens = [
+            "engine",
+            "engine_left",
+            "engine_right",
+            "left_engine",
+            "right_engine",
+            "nozzle",
+            "exhaust",
+            "afterburner",
+            "turbine",
+        ]
+
+        if "temp_deviation" in signal:
             regions.append(
                 {
                     "label": "Thermal anomaly",
-                    "tokens": ["engine", "nozzle", "exhaust", "afterburner", "turbine"],
+                    "tokens": common_engine_tokens + ["tailpipe", "heat", "combustor"],
                     "severity": risk,
                 }
             )
-        elif "vibration_excess" in reason or "vibration_excess" in reason_code:
+        if "vibration_excess" in signal:
             regions.append(
                 {
                     "label": "Vibration anomaly",
-                    "tokens": ["turbine", "fan", "compressor", "shaft", "engine"],
+                    "tokens": common_engine_tokens + ["fan", "compressor", "shaft", "rotor"],
                     "severity": risk,
                 }
             )
-        elif "efficiency_drop" in reason or "efficiency_drop" in reason_code:
+        if "efficiency_drop" in signal:
             regions.append(
                 {
                     "label": "Efficiency anomaly",
-                    "tokens": ["intake", "inlet", "compressor", "exhaust", "engine"],
+                    "tokens": common_engine_tokens + ["intake", "inlet", "compressor"],
                     "severity": risk,
                 }
             )
-        else:
+        if not regions:
             regions.append(
                 {
                     "label": "General anomaly",
-                    "tokens": ["engine", "nozzle", "turbine", "exhaust"],
+                    "tokens": common_engine_tokens,
                     "severity": risk,
                 }
             )
