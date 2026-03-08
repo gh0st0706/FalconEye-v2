@@ -316,6 +316,10 @@ def _threejs_rafale_html(
   let lastTwoDepth = null;
   let lastTwoAngle = null;
   let lastTwoGap = null;
+  let grabActive = false;
+  let grabAnchor = null;
+  let grabStartRotation = null;
+  let grabReleaseFrames = 0;
   const zoomDeadband = 0.004;
   const zoomGain = 95.0;
 
@@ -578,6 +582,10 @@ def _threejs_rafale_html(
         lastTwoDepth = null;
         lastTwoAngle = null;
         lastTwoGap = null;
+        grabActive = false;
+        grabAnchor = null;
+        grabStartRotation = null;
+        grabReleaseFrames = 0;
         statusEl.textContent = "Tracking paused (fist)";
         return;
       }}
@@ -594,6 +602,10 @@ def _threejs_rafale_html(
           lastTwoDepth = null;
           lastTwoAngle = null;
           lastTwoGap = null;
+          grabActive = false;
+          grabAnchor = null;
+          grabStartRotation = null;
+          grabReleaseFrames = 0;
           statusEl.textContent = "Tracking resumed";
         }}
         return;
@@ -610,23 +622,37 @@ def _threejs_rafale_html(
         const ballHold = isBallHoldGesture(lm, isFistNow);
 
         if (ballHold) {{
-          if (lastPalmX !== null && lastPalmY !== null) {{
-            const dx = cx - lastPalmX;
-            const dy = cy - lastPalmY;
-            const dz = cz - lastPalmZ;
-            desiredRotation.y = THREE.MathUtils.clamp(desiredRotation.y - dx * 8.8, -1.20, 1.20);
-            desiredRotation.x = THREE.MathUtils.clamp(desiredRotation.x - dy * 8.2 - dz * 2.3, -0.85, 0.85);
+          grabReleaseFrames = 0;
+          if (!grabActive) {{
+            grabActive = true;
+            grabAnchor = {{ x: cx, y: cy, z: cz, twist: palmTwist }};
+            grabStartRotation = {{ x: desiredRotation.x, y: desiredRotation.y, z: desiredRotation.z }};
           }}
-          if (lastPalmTwist !== null) {{
-            const dTwist = wrapAngleDelta(palmTwist - lastPalmTwist);
-            desiredRotation.z = THREE.MathUtils.clamp(desiredRotation.z + dTwist * 2.0, -1.05, 1.05);
-          }}
-          statusEl.textContent = "One-hand rotate mode";
+          const dx = cx - grabAnchor.x;
+          const dy = cy - grabAnchor.y;
+          const dz = cz - grabAnchor.z;
+          const dTwist = wrapAngleDelta(palmTwist - grabAnchor.twist);
+          desiredRotation.y = THREE.MathUtils.clamp(grabStartRotation.y - dx * 11.0, -1.20, 1.20);
+          desiredRotation.x = THREE.MathUtils.clamp(grabStartRotation.x - dy * 10.2 - dz * 3.0, -0.90, 0.90);
+          desiredRotation.z = THREE.MathUtils.clamp(grabStartRotation.z + dTwist * 2.6, -1.15, 1.15);
+          statusEl.textContent = "One-hand grab mode";
         }} else {{
-          desiredRotation.y = THREE.MathUtils.clamp((cx - 0.5) * -2.9, -1.20, 1.20);
-          desiredRotation.x = THREE.MathUtils.clamp((0.5 - cy) * 2.5, -0.85, 0.85);
-          desiredRotation.z = THREE.MathUtils.clamp(palmTwist * 1.05, -1.05, 1.05);
-          statusEl.textContent = "One-hand rotate mode";
+          // Keep grab stable for a couple frames before releasing to avoid flicker jitter.
+          if (grabActive) {{
+            grabReleaseFrames += 1;
+            if (grabReleaseFrames >= 3) {{
+              grabActive = false;
+              grabAnchor = null;
+              grabStartRotation = null;
+              grabReleaseFrames = 0;
+            }}
+            statusEl.textContent = "One-hand grab hold";
+          }} else {{
+            desiredRotation.y = THREE.MathUtils.clamp((cx - 0.5) * -2.4, -1.20, 1.20);
+            desiredRotation.x = THREE.MathUtils.clamp((0.5 - cy) * 2.1, -0.85, 0.85);
+            desiredRotation.z = THREE.MathUtils.clamp(palmTwist * 0.95, -1.05, 1.05);
+            statusEl.textContent = "One-hand rotate mode";
+          }}
         }}
 
         lastPalmX = cx;
@@ -663,6 +689,10 @@ def _threejs_rafale_html(
       lastTwoGap = gap;
 
       // Reset one-hand rotation delta state while in zoom mode.
+      grabActive = false;
+      grabAnchor = null;
+      grabStartRotation = null;
+      grabReleaseFrames = 0;
       lastPalmX = null;
       lastPalmY = null;
       lastPalmZ = null;
