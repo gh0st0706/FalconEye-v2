@@ -305,6 +305,8 @@ def _threejs_rafale_html(
   let trackedModel = null;
   const baseRotation = {{ x: 0, y: 0, z: 0 }};
   const desiredRotation = {{ x: 0, y: 0, z: 0 }};
+  const basePosition = {{ x: 0, y: 0, z: 0 }};
+  const desiredOffset = {{ x: 0, y: 0, z: 0 }};
   let handPaused = false;
   let lastHandOpen = null;
   let lastPalmX = null;
@@ -319,6 +321,7 @@ def _threejs_rafale_html(
   let grabActive = false;
   let grabAnchor = null;
   let grabStartRotation = null;
+  let grabStartOffset = null;
   let grabReleaseFrames = 0;
   const zoomDeadband = 0.004;
   const zoomGain = 95.0;
@@ -585,6 +588,7 @@ def _threejs_rafale_html(
         grabActive = false;
         grabAnchor = null;
         grabStartRotation = null;
+        grabStartOffset = null;
         grabReleaseFrames = 0;
         statusEl.textContent = "Tracking paused (fist)";
         return;
@@ -605,6 +609,7 @@ def _threejs_rafale_html(
           grabActive = false;
           grabAnchor = null;
           grabStartRotation = null;
+          grabStartOffset = null;
           grabReleaseFrames = 0;
           statusEl.textContent = "Tracking resumed";
         }}
@@ -627,6 +632,7 @@ def _threejs_rafale_html(
             grabActive = true;
             grabAnchor = {{ x: cx, y: cy, z: cz, twist: palmTwist }};
             grabStartRotation = {{ x: desiredRotation.x, y: desiredRotation.y, z: desiredRotation.z }};
+            grabStartOffset = {{ x: desiredOffset.x, y: desiredOffset.y, z: desiredOffset.z }};
           }}
           const dx = cx - grabAnchor.x;
           const dy = cy - grabAnchor.y;
@@ -635,7 +641,11 @@ def _threejs_rafale_html(
           desiredRotation.y = THREE.MathUtils.clamp(grabStartRotation.y - dx * 11.0, -1.20, 1.20);
           desiredRotation.x = THREE.MathUtils.clamp(grabStartRotation.x - dy * 10.2 - dz * 3.0, -0.90, 0.90);
           desiredRotation.z = THREE.MathUtils.clamp(grabStartRotation.z + dTwist * 2.6, -1.15, 1.15);
-          statusEl.textContent = "One-hand grab mode";
+          // Move aircraft with hand direction (x/y) + depth (z).
+          desiredOffset.x = THREE.MathUtils.clamp(grabStartOffset.x + dx * 8.5, -2.8, 2.8);
+          desiredOffset.y = THREE.MathUtils.clamp(grabStartOffset.y - dy * 5.4, -1.8, 1.8);
+          desiredOffset.z = THREE.MathUtils.clamp(grabStartOffset.z - dz * 7.2, -2.5, 2.5);
+          statusEl.textContent = "One-hand grab+move mode";
         }} else {{
           // Keep grab stable for a couple frames before releasing to avoid flicker jitter.
           if (grabActive) {{
@@ -644,6 +654,7 @@ def _threejs_rafale_html(
               grabActive = false;
               grabAnchor = null;
               grabStartRotation = null;
+              grabStartOffset = null;
               grabReleaseFrames = 0;
             }}
             statusEl.textContent = "One-hand grab hold";
@@ -692,6 +703,7 @@ def _threejs_rafale_html(
       grabActive = false;
       grabAnchor = null;
       grabStartRotation = null;
+      grabStartOffset = null;
       grabReleaseFrames = 0;
       lastPalmX = null;
       lastPalmY = null;
@@ -790,6 +802,9 @@ def _threejs_rafale_html(
       mountTwinEngines(loader, model, function(attached) {{
         fitCameraToObject(model);
         trackedModel = model;
+        basePosition.x = model.position.x;
+        basePosition.y = model.position.y;
+        basePosition.z = model.position.z;
         baseRotation.x = model.rotation.x;
         baseRotation.y = model.rotation.y;
         baseRotation.z = model.rotation.z;
@@ -827,6 +842,9 @@ def _threejs_rafale_html(
 
   function animate() {{
     if (trackedModel && handTrackingEnabled && !handPaused) {{
+      trackedModel.position.x = THREE.MathUtils.lerp(trackedModel.position.x, basePosition.x + desiredOffset.x, 0.22);
+      trackedModel.position.y = THREE.MathUtils.lerp(trackedModel.position.y, basePosition.y + desiredOffset.y, 0.22);
+      trackedModel.position.z = THREE.MathUtils.lerp(trackedModel.position.z, basePosition.z + desiredOffset.z, 0.20);
       trackedModel.rotation.x = THREE.MathUtils.lerp(trackedModel.rotation.x, baseRotation.x + desiredRotation.x, 0.24);
       trackedModel.rotation.y = THREE.MathUtils.lerp(trackedModel.rotation.y, baseRotation.y + desiredRotation.y, 0.24);
       trackedModel.rotation.z = THREE.MathUtils.lerp(trackedModel.rotation.z, baseRotation.z + desiredRotation.z, 0.20);
