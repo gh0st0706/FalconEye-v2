@@ -325,6 +325,21 @@ def _threejs_rafale_html(
   let grabReleaseFrames = 0;
   const zoomDeadband = 0.004;
   const zoomGain = 95.0;
+  const defaultCameraPos = new THREE.Vector3();
+  const defaultCameraTarget = new THREE.Vector3();
+  let defaultViewReady = false;
+  let modelRadius = 4.0;
+  let anomalyFocusQueue = [];
+  let anomalyTourActive = false;
+  let anomalyTourIndex = 0;
+  let anomalyTourT = 0.0;
+  let anomalyTourHold = 0;
+  let tourFromPos = new THREE.Vector3();
+  let tourFromTarget = new THREE.Vector3();
+  let tourToPos = new THREE.Vector3();
+  let tourToTarget = new THREE.Vector3();
+  const snapState = {{}};
+  let snapCooldownFrames = 0;
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.7));
   const key = new THREE.DirectionalLight(0xffffff, 1.1);
@@ -339,6 +354,7 @@ def _threejs_rafale_html(
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
+    modelRadius = maxDim * 0.5;
     const fov = camera.fov * Math.PI / 180.0;
     const dist = (maxDim * 0.5) / Math.tan(fov * 0.5) * 1.6;
     camera.position.copy(center.clone().add(new THREE.Vector3(1.0, 0.35, 1.0).normalize().multiplyScalar(dist)));
@@ -349,6 +365,159 @@ def _threejs_rafale_html(
     controls.minDistance = maxDim * 0.2;
     controls.maxDistance = maxDim * 20;
     controls.update();
+  }}
+
+  function captureDefaultView() {{
+    defaultCameraPos.copy(camera.position);
+    defaultCameraTarget.copy(controls.target);
+    defaultViewReady = true;
+  }}
+
+  function resetTrackingState() {{
+    lastHandOpen = null;
+    lastPalmX = null;
+    lastPalmY = null;
+    lastPalmZ = null;
+    lastPalmTwist = null;
+    lastTwoCenterX = null;
+    lastTwoCenterY = null;
+    lastTwoDepth = null;
+    lastTwoAngle = null;
+    lastTwoGap = null;
+    grabActive = false;
+    grabAnchor = null;
+    grabStartRotation = null;
+    grabStartOffset = null;
+    grabReleaseFrames = 0;
+  }}
+
+  function stopAnomalyTour() {{
+    anomalyTourActive = false;
+    anomalyTourIndex = 0;
+    anomalyTourT = 0.0;
+    anomalyTourHold = 0;
+  }}
+
+  function resetModelToDefault() {{
+    if (!trackedModel) return;
+    desiredRotation.x = 0;
+    desiredRotation.y = 0;
+    desiredRotation.z = 0;
+    desiredOffset.x = 0;
+    desiredOffset.y = 0;
+    desiredOffset.z = 0;
+    trackedModel.position.set(basePosition.x, basePosition.y, basePosition.z);
+    trackedModel.rotation.set(baseRotation.x, baseRotation.y, baseRotation.z);
+    if (defaultViewReady) {{
+      camera.position.copy(defaultCameraPos);
+      controls.target.copy(defaultCameraTarget);
+      controls.update();
+    }}
+  }}
+
+  function detectSnapGesture(lm, key) {{
+    const state = snapState[key] || {{ wasPinched: false, lastMx: lm[12].x, lastMy: lm[12].y }};
+    const thumbMiddle = pointDist(lm[4], lm[12]);
+    const thumbIndex = pointDist(lm[4], lm[8]);
+    const pinchNow = (thumbMiddle < 0.055 && thumbIndex < 0.090);
+    const middleSpeed = Math.hypot(lm[12].x - state.lastMx, lm[12].y - state.lastMy);
+    const indexExtended = lm[8].y < lm[6].y;
+    const snap = state.wasPinched && !pinchNow && thumbMiddle > 0.090 && middleSpeed > 0.024 && indexExtended;
+    state.wasPinched = pinchNow;
+    state.lastMx = lm[12].x;
+    state.lastMy = lm[12].y;
+    snapState[key] = state;
+    return snap;
+  }}
+
+  function buildAnomalyFocusQueue(model, anomalyRegions, engineMeshSet) {{
+    const regionHits = new Map();
+    model.updateMatrixWorld(true);
+    model.traverse(function(node) {{
+      if (!node.isMesh) return;
+      const searchText = getMeshSearchText(node);
+      const hit = anomalyRegions.find((r) => meshMatches(searchText, r));
+      if (!hit) return;
+      const label = String(hit.label || "Anomaly");
+      const p = new THREE.Vector3();
+      node.getWorldPosition(p);
+      if (!regionHits.has(label)) regionHits.set(label, []);
+      regionHits.get(label).push(p);
+    }});
+
+    const queue = [];
+    for (const [label, points] of regionHits.entries()) {{
+      if (!points || points.length === 0) continue;
+      const c = new THREE.Vector3();
+      for (const p of points) c.add(p);
+      c.divideScalar(points.length);
+      queue.push({{ label, center: c }});
+    }}
+
+    if (queue.length === 0 && (riskLevel === "warning" || riskLevel === "critical")) {{
+      const points = [];
+      for (const node of engineMeshSet) {{
+        if (!node || !node.isMesh) continue;
+        const p = new THREE.Vector3();
+        node.getWorldPosition(p);
+        points.push(p);
+      }}
+      if (points.length > 0) {{
+        const c = new THREE.Vector3();
+        for (const p of points) c.add(p);
+        c.divideScalar(points.length);
+        queue.push({{ label: "Engine anomaly", center: c }});
+      }}
+    }}
+    return queue;
+  }}
+
+  function beginAnomalyTourStep(index) {{
+    if (!anomalyFocusQueue[index]) return false;
+    const focus = anomalyFocusQueue[index];
+    tourFromPos.copy(camera.position);
+    tourFromTarget.copy(controls.target);
+    tourToTarget.copy(focus.center);
+    const direction = camera.position.clone().sub(controls.target).normalize();
+    const focusDist = THREE.MathUtils.clamp(modelRadius * 0.85, controls.minDistance * 1.05, Math.max(controls.minDistance * 1.2, controls.maxDistance * 0.45));
+    tourToPos.copy(focus.center.clone().add(direction.multiplyScalar(focusDist)));
+    anomalyTourT = 0.0;
+    anomalyTourHold = 0;
+    statusEl.textContent = "Anomaly focus: " + focus.label;
+    return true;
+  }}
+
+  function startAnomalyTour() {{
+    if (!trackedModel || anomalyFocusQueue.length === 0) {{
+      statusEl.textContent = "No anomaly region to focus";
+      return;
+    }}
+    stopAnomalyTour();
+    handPaused = true;
+    controls.autoRotate = false;
+    anomalyTourActive = true;
+    anomalyTourIndex = 0;
+    beginAnomalyTourStep(anomalyTourIndex);
+  }}
+
+  function updateAnomalyTour() {{
+    if (!anomalyTourActive) return;
+    const smooth = anomalyTourT * anomalyTourT * (3.0 - 2.0 * anomalyTourT);
+    camera.position.lerpVectors(tourFromPos, tourToPos, smooth);
+    controls.target.lerpVectors(tourFromTarget, tourToTarget, smooth);
+    controls.update();
+    anomalyTourT = Math.min(1.0, anomalyTourT + 0.035);
+    if (anomalyTourT < 1.0) return;
+    anomalyTourHold += 1;
+    if (anomalyTourHold < 44) return;
+    anomalyTourIndex += 1;
+    if (anomalyTourIndex >= anomalyFocusQueue.length) {{
+      stopAnomalyTour();
+      handPaused = false;
+      statusEl.textContent = "Anomaly tour complete";
+      return;
+    }}
+    beginAnomalyTourStep(anomalyTourIndex);
   }}
 
   function getMeshSearchText(node) {{
@@ -589,46 +758,39 @@ def _threejs_rafale_html(
       if (!trackedModel || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
       const handLandmarks = results.multiHandLandmarks.filter((lm) => lm && lm.length >= 21);
       if (handLandmarks.length === 0) return;
+      if (snapCooldownFrames > 0) snapCooldownFrames -= 1;
       statusEl.textContent = "Hand tracking active";
 
       const anyFist = handLandmarks.some((lm) => detectFist(lm));
       if (anyFist && !handPaused) {{
+        stopAnomalyTour();
+        resetTrackingState();
+        resetModelToDefault();
         handPaused = true;
-        lastHandOpen = null;
-        lastTwoCenterX = null;
-        lastTwoCenterY = null;
-        lastTwoDepth = null;
-        lastTwoAngle = null;
-        lastTwoGap = null;
-        grabActive = false;
-        grabAnchor = null;
-        grabStartRotation = null;
-        grabStartOffset = null;
-        grabReleaseFrames = 0;
-        statusEl.textContent = "Tracking paused (fist)";
+        statusEl.textContent = "Reset to default (fist)";
         return;
       }}
       if (handPaused) {{
         if (handLandmarks.some((lm) => detectOpenPalm(lm))) {{
           handPaused = false;
-          lastHandOpen = null;
-          lastPalmX = null;
-          lastPalmY = null;
-          lastPalmZ = null;
-          lastPalmTwist = null;
-          lastTwoCenterX = null;
-          lastTwoCenterY = null;
-          lastTwoDepth = null;
-          lastTwoAngle = null;
-          lastTwoGap = null;
-          grabActive = false;
-          grabAnchor = null;
-          grabStartRotation = null;
-          grabStartOffset = null;
-          grabReleaseFrames = 0;
+          resetTrackingState();
           statusEl.textContent = "Tracking resumed";
         }}
         return;
+      }}
+
+      if (!anomalyTourActive && snapCooldownFrames === 0) {{
+        for (let i = 0; i < handLandmarks.length; i += 1) {{
+          const lm = handLandmarks[i];
+          const handInfo = (results.multiHandedness && results.multiHandedness[i] && results.multiHandedness[i].label)
+            ? String(results.multiHandedness[i].label).toLowerCase()
+            : ("hand_" + i);
+          if (detectSnapGesture(lm, handInfo)) {{
+            snapCooldownFrames = 36;
+            startAnomalyTour();
+            return;
+          }}
+        }}
       }}
 
       // Mode A: one hand = rotate only.
@@ -861,6 +1023,7 @@ def _threejs_rafale_html(
       model.position.sub(sbox.getCenter(new THREE.Vector3()));
       mountTwinEngines(loader, model, function(attached) {{
         fitCameraToObject(model);
+        captureDefaultView();
         trackedModel = model;
         basePosition.x = model.position.x;
         basePosition.y = model.position.y;
@@ -868,6 +1031,7 @@ def _threejs_rafale_html(
         baseRotation.x = model.rotation.x;
         baseRotation.y = model.rotation.y;
         baseRotation.z = model.rotation.z;
+        anomalyFocusQueue = buildAnomalyFocusQueue(model, anomalyRegions, engineMeshSet);
         statusEl.textContent = handTrackingEnabled
           ? "Viewer loaded (starting hand tracking...)"
           : "Viewer loaded" + (attached ? " + twin engines mounted" : "");
@@ -901,7 +1065,7 @@ def _threejs_rafale_html(
   window.addEventListener("resize", onResize);
 
   function animate() {{
-    if (trackedModel && handTrackingEnabled && !handPaused) {{
+    if (trackedModel && handTrackingEnabled && !handPaused && !anomalyTourActive) {{
       trackedModel.position.x = THREE.MathUtils.lerp(trackedModel.position.x, basePosition.x + desiredOffset.x, 0.22);
       trackedModel.position.y = THREE.MathUtils.lerp(trackedModel.position.y, basePosition.y + desiredOffset.y, 0.22);
       trackedModel.position.z = THREE.MathUtils.lerp(trackedModel.position.z, basePosition.z + desiredOffset.z, 0.20);
@@ -909,6 +1073,7 @@ def _threejs_rafale_html(
       trackedModel.rotation.y = THREE.MathUtils.lerp(trackedModel.rotation.y, baseRotation.y + desiredRotation.y, 0.24);
       trackedModel.rotation.z = THREE.MathUtils.lerp(trackedModel.rotation.z, baseRotation.z + desiredRotation.z, 0.20);
     }}
+    updateAnomalyTour();
     controls.update();
     renderer.render(scene, camera);
     requestAnimationFrame(animate);
