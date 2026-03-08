@@ -303,10 +303,6 @@ def _threejs_rafale_html(
   controls.target.set(0, 0, 0);
 
   let trackedModel = null;
-  let interactionSphere = null;
-  let interactionSphereBaseOpacity = 0.30;
-  let interactionSphereActive = false;
-  let lastHandSeenAt = 0;
   const baseRotation = {{ x: 0, y: 0, z: 0 }};
   const desiredRotation = {{ x: 0, y: 0, z: 0 }};
   let handPaused = false;
@@ -319,6 +315,7 @@ def _threejs_rafale_html(
   let lastTwoCenterY = null;
   let lastTwoDepth = null;
   let lastTwoAngle = null;
+  let lastTwoGap = null;
   const zoomDeadband = 0.004;
   const zoomGain = 95.0;
 
@@ -352,67 +349,6 @@ def _threejs_rafale_html(
     return tokens.some((t) => meshName.includes(String(t).toLowerCase()));
   }}
 
-  function createInteractionSphere(model) {{
-    const bbox = new THREE.Box3().setFromObject(model);
-    const size = bbox.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
-    const radiusLocal = Math.max(3.0, maxDim * 0.38);
-
-    const sphereGeo = new THREE.SphereGeometry(radiusLocal, 36, 24);
-    const sphereMat = new THREE.MeshBasicMaterial({{
-      color: 0x00ffff,
-      wireframe: true,
-      transparent: true,
-      opacity: interactionSphereBaseOpacity,
-    }});
-    const sphere = new THREE.Mesh(sphereGeo, sphereMat);
-    sphere.name = "interaction_sphere";
-    sphere.userData.radiusLocal = radiusLocal;
-    sphere.userData.baseOpacity = interactionSphereBaseOpacity;
-    sphere.position.set(0, 0, 0);
-    model.add(sphere);
-    return sphere;
-  }}
-
-  function estimatePalmWorldPosition(lm) {{
-    // MediaPipe [0..1] -> NDC.
-    const ndcX = lm[9].x * 2.0 - 1.0;
-    const ndcY = -(lm[9].y * 2.0 - 1.0);
-    const rayPoint = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(camera);
-    const rayDir = rayPoint.sub(camera.position).normalize();
-    const baseDepth = camera.position.distanceTo(controls.target) * 0.60;
-    const zAdj = (lm[9].z || 0) * 8.0;
-    const depth = THREE.MathUtils.clamp(baseDepth + zAdj, 2.0, 45.0);
-    return camera.position.clone().add(rayDir.multiplyScalar(depth));
-  }}
-
-  function updateInteractionGate(handLandmarks) {{
-    if (!trackedModel || !interactionSphere || !handLandmarks || handLandmarks.length === 0) {{
-      interactionSphereActive = false;
-      return false;
-    }}
-    const sphereCenter = new THREE.Vector3();
-    interactionSphere.getWorldPosition(sphereCenter);
-    const worldScale = new THREE.Vector3();
-    trackedModel.getWorldScale(worldScale);
-    const sphereRadiusWorld = (interactionSphere.userData.radiusLocal || 3.0) * worldScale.x;
-
-    let active = false;
-    for (const lm of handLandmarks) {{
-      const palmWorld = estimatePalmWorldPosition(lm);
-      const dist = palmWorld.distanceTo(sphereCenter);
-      if (dist < sphereRadiusWorld) {{
-        active = true;
-        break;
-      }}
-    }}
-    interactionSphereActive = active;
-
-    if (interactionSphere.material && interactionSphere.material.color) {{
-      interactionSphere.material.color.set(active ? 0x00ff66 : 0x00ffff);
-    }}
-    return active;
-  }}
 
   function findWingAnchors(model) {{
     const fallback = {{
@@ -631,13 +567,7 @@ def _threejs_rafale_html(
       if (!trackedModel || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
       const handLandmarks = results.multiHandLandmarks.filter((lm) => lm && lm.length >= 21);
       if (handLandmarks.length === 0) return;
-      lastHandSeenAt = performance.now();
-
-      const inSphere = updateInteractionGate(handLandmarks);
-      if (!inSphere) {{
-        statusEl.textContent = "Hand outside interaction sphere";
-        return;
-      }}
+      statusEl.textContent = "Hand tracking active";
 
       const anyFist = handLandmarks.some((lm) => detectFist(lm));
       if (anyFist && !handPaused) {{
@@ -647,6 +577,7 @@ def _threejs_rafale_html(
         lastTwoCenterY = null;
         lastTwoDepth = null;
         lastTwoAngle = null;
+        lastTwoGap = null;
         statusEl.textContent = "Tracking paused (fist)";
         return;
       }}
@@ -662,68 +593,81 @@ def _threejs_rafale_html(
           lastTwoCenterY = null;
           lastTwoDepth = null;
           lastTwoAngle = null;
+          lastTwoGap = null;
           statusEl.textContent = "Tracking resumed";
         }}
         return;
       }}
 
-      // Mode A: one hand = zoom only (no rotation updates).
+      // Mode A: one hand = rotate only.
       if (handLandmarks.length === 1) {{
         const lm = handLandmarks[0];
-        const openNow = handOpenMetric(lm);
-        if (lastHandOpen !== null) {{
-          const openDelta = openNow - lastHandOpen;
-          if (Math.abs(openDelta) > zoomDeadband) {{
-            const toCam = camera.position.clone().sub(controls.target).normalize();
-            const cur = camera.position.distanceTo(controls.target);
-            const next = THREE.MathUtils.clamp(cur - openDelta * zoomGain, 4.5, 26.0);
-            camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(next)));
-            statusEl.textContent = openDelta < 0 ? "One-hand zoom in" : "One-hand zoom out";
-          }} else {{
-            statusEl.textContent = "One-hand zoom mode";
-          }}
-        }}
-        lastHandOpen = openNow;
+        const isFistNow = detectFist(lm);
+        const cx = lm[9].x;
+        const cy = lm[9].y;
+        const cz = lm[9].z || 0;
+        const palmTwist = Math.atan2(lm[5].y - lm[17].y, lm[5].x - lm[17].x);
+        const ballHold = isBallHoldGesture(lm, isFistNow);
 
-        // Reset two-hand rotation deltas to avoid jumps when second hand appears.
+        if (ballHold) {{
+          if (lastPalmX !== null && lastPalmY !== null) {{
+            const dx = cx - lastPalmX;
+            const dy = cy - lastPalmY;
+            const dz = cz - lastPalmZ;
+            desiredRotation.y = THREE.MathUtils.clamp(desiredRotation.y - dx * 8.8, -1.20, 1.20);
+            desiredRotation.x = THREE.MathUtils.clamp(desiredRotation.x - dy * 8.2 - dz * 2.3, -0.85, 0.85);
+          }}
+          if (lastPalmTwist !== null) {{
+            const dTwist = wrapAngleDelta(palmTwist - lastPalmTwist);
+            desiredRotation.z = THREE.MathUtils.clamp(desiredRotation.z + dTwist * 2.0, -1.05, 1.05);
+          }}
+          statusEl.textContent = "One-hand rotate mode";
+        }} else {{
+          desiredRotation.y = THREE.MathUtils.clamp((cx - 0.5) * -2.9, -1.20, 1.20);
+          desiredRotation.x = THREE.MathUtils.clamp((0.5 - cy) * 2.5, -0.85, 0.85);
+          desiredRotation.z = THREE.MathUtils.clamp(palmTwist * 1.05, -1.05, 1.05);
+          statusEl.textContent = "One-hand rotate mode";
+        }}
+
+        lastPalmX = cx;
+        lastPalmY = cy;
+        lastPalmZ = cz;
+        lastPalmTwist = palmTwist;
+
+        // Reset two-hand zoom state to avoid jumps when second hand appears.
         lastTwoCenterX = null;
         lastTwoCenterY = null;
         lastTwoDepth = null;
         lastTwoAngle = null;
-        lastPalmX = null;
-        lastPalmY = null;
-        lastPalmZ = null;
-        lastPalmTwist = null;
+        lastTwoGap = null;
         return;
       }}
 
-      // Mode B: two hands = grab-and-rotate only.
+      // Mode B: two hands = zoom only.
       const sorted = handLandmarks.slice().sort((a, b) => a[9].x - b[9].x);
       const left = sorted[0];
       const right = sorted[1];
-      const cx = (left[9].x + right[9].x) * 0.5;
-      const cy = (left[9].y + right[9].y) * 0.5;
-      const cz = ((left[9].z || 0) + (right[9].z || 0)) * 0.5;
-      const lineAngle = Math.atan2(right[9].y - left[9].y, right[9].x - left[9].x);
-
-      if (lastTwoCenterX !== null && lastTwoCenterY !== null) {{
-        const dx = cx - lastTwoCenterX;
-        const dy = cy - lastTwoCenterY;
-        const dz = cz - lastTwoDepth;
-        desiredRotation.y = THREE.MathUtils.clamp(desiredRotation.y - dx * 7.8, -1.20, 1.20);
-        desiredRotation.x = THREE.MathUtils.clamp(desiredRotation.x - dy * 7.4 - dz * 2.0, -0.85, 0.85);
+      const gap = Math.hypot(right[9].x - left[9].x, right[9].y - left[9].y);
+      if (lastTwoGap !== null) {{
+        const gapDelta = gap - lastTwoGap;
+        if (Math.abs(gapDelta) > 0.003) {{
+          const toCam = camera.position.clone().sub(controls.target).normalize();
+          const cur = camera.position.distanceTo(controls.target);
+          const next = THREE.MathUtils.clamp(cur - gapDelta * 28.0, 4.5, 26.0);
+          camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(next)));
+          statusEl.textContent = gapDelta > 0 ? "Two-hand zoom in" : "Two-hand zoom out";
+        }} else {{
+          statusEl.textContent = "Two-hand zoom mode";
+        }}
       }}
-      if (lastTwoAngle !== null) {{
-        const dA = wrapAngleDelta(lineAngle - lastTwoAngle);
-        desiredRotation.z = THREE.MathUtils.clamp(desiredRotation.z + dA * 1.9, -1.05, 1.05);
-      }}
+      lastTwoGap = gap;
 
-      lastTwoCenterX = cx;
-      lastTwoCenterY = cy;
-      lastTwoDepth = cz;
-      lastTwoAngle = lineAngle;
+      // Reset one-hand rotation delta state while in zoom mode.
+      lastPalmX = null;
+      lastPalmY = null;
+      lastPalmZ = null;
+      lastPalmTwist = null;
       lastHandOpen = null;
-      statusEl.textContent = "Two-hand grab rotate mode";
     }});
 
     const video = document.createElement("video");
@@ -816,7 +760,6 @@ def _threejs_rafale_html(
       mountTwinEngines(loader, model, function(attached) {{
         fitCameraToObject(model);
         trackedModel = model;
-        interactionSphere = createInteractionSphere(model);
         baseRotation.x = model.rotation.x;
         baseRotation.y = model.rotation.y;
         baseRotation.z = model.rotation.z;
@@ -853,24 +796,6 @@ def _threejs_rafale_html(
   window.addEventListener("resize", onResize);
 
   function animate() {{
-    if (performance.now() - lastHandSeenAt > 320) {{
-      interactionSphereActive = false;
-      if (interactionSphere && interactionSphere.material && interactionSphere.material.color) {{
-        interactionSphere.material.color.set(0x00ffff);
-      }}
-    }}
-    if (interactionSphere) {{
-      interactionSphere.rotation.y += 0.006;
-      interactionSphere.rotation.x += 0.002;
-      const t = performance.now() * 0.002;
-      const pulseBase = interactionSphere.userData.baseOpacity || 0.30;
-      const pulseAmp = interactionSphereActive ? 0.10 : 0.04;
-      interactionSphere.material.opacity = THREE.MathUtils.clamp(
-        pulseBase + pulseAmp * Math.sin(t),
-        0.22,
-        0.42
-      );
-    }}
     if (trackedModel && handTrackingEnabled && !handPaused) {{
       trackedModel.rotation.x = THREE.MathUtils.lerp(trackedModel.rotation.x, baseRotation.x + desiredRotation.x, 0.24);
       trackedModel.rotation.y = THREE.MathUtils.lerp(trackedModel.rotation.y, baseRotation.y + desiredRotation.y, 0.24);
