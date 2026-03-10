@@ -338,8 +338,8 @@ def _threejs_rafale_html(
   let tourFromTarget = new THREE.Vector3();
   let tourToPos = new THREE.Vector3();
   let tourToTarget = new THREE.Vector3();
-  const snapState = {{}};
-  let snapCooldownFrames = 0;
+  let tourGestureHoldFrames = 0;
+  let tourCooldownFrames = 0;
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.7));
   const key = new THREE.DirectionalLight(0xffffff, 1.1);
@@ -415,28 +415,20 @@ def _threejs_rafale_html(
     }}
   }}
 
-  function detectSnapGesture(lm, key) {{
-    const state = snapState[key] || {{
-      holdFrames: 0,
-    }};
-
-    const indexUp = lm[8].y < lm[6].y;
-    const middleUp = lm[12].y < lm[10].y;
-    const ringDown = lm[16].y > lm[14].y;
-    const pinkyDown = lm[20].y > lm[18].y;
-    const vSpread = Math.abs(lm[8].x - lm[12].x);
-    const isVSign = indexUp && middleUp && ringDown && pinkyDown && vSpread > 0.05;
-
-    if (isVSign) {{
-      state.holdFrames += 1;
-    }} else {{
-      state.holdFrames = 0;
+  function detectTwoHandTourGesture(handLandmarks) {{
+    if (!handLandmarks || handLandmarks.length < 2) {{
+      tourGestureHoldFrames = 0;
+      return false;
     }}
-
-    const snap = state.holdFrames >= 8; // ~250ms stable hold at typical camera FPS
-    if (snap) state.holdFrames = 0;
-    snapState[key] = state;
-    return snap;
+    const openCount = handLandmarks.filter((lm) => detectOpenPalm(lm)).length;
+    if (openCount >= 2) {{
+      tourGestureHoldFrames += 1;
+    }} else {{
+      tourGestureHoldFrames = 0;
+    }}
+    const triggered = tourGestureHoldFrames >= 12; // ~350-400ms hold
+    if (triggered) tourGestureHoldFrames = 0;
+    return triggered;
   }}
 
   function buildAnomalyFocusQueue(model, anomalyRegions, engineMeshSet) {{
@@ -767,7 +759,7 @@ def _threejs_rafale_html(
       if (!trackedModel || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
       const handLandmarks = results.multiHandLandmarks.filter((lm) => lm && lm.length >= 21);
       if (handLandmarks.length === 0) return;
-      if (snapCooldownFrames > 0) snapCooldownFrames -= 1;
+      if (tourCooldownFrames > 0) tourCooldownFrames -= 1;
       statusEl.textContent = "Hand tracking active";
 
       const anyFist = handLandmarks.some((lm) => detectFist(lm));
@@ -788,18 +780,12 @@ def _threejs_rafale_html(
         return;
       }}
 
-      if (!anomalyTourActive && snapCooldownFrames === 0) {{
-        for (let i = 0; i < handLandmarks.length; i += 1) {{
-          const lm = handLandmarks[i];
-          const handInfo = (results.multiHandedness && results.multiHandedness[i] && results.multiHandedness[i].label)
-            ? String(results.multiHandedness[i].label).toLowerCase()
-            : ("hand_" + i);
-          if (detectSnapGesture(lm, handInfo)) {{
-            snapCooldownFrames = 36;
-            statusEl.textContent = "Tour gesture detected (V-sign)";
-            startAnomalyTour();
-            return;
-          }}
+      if (!anomalyTourActive && tourCooldownFrames === 0) {{
+        if (detectTwoHandTourGesture(handLandmarks)) {{
+          tourCooldownFrames = 45;
+          statusEl.textContent = "Tour gesture detected (two-hand open)";
+          startAnomalyTour();
+          return;
         }}
       }}
 
