@@ -7,9 +7,88 @@ import base64
 import json
 from pathlib import Path
 from engine import EngineStateModel
-from stream_processor import StreamingTelemetryProcessor, normalize_telemetry_frame
+from stream_processor import (
+    StreamingTelemetryProcessor,
+    normalize_telemetry_frame,
+    REQUIRED_COLUMNS,
+    OPTIONAL_NUMERIC_COLUMNS,
+)
 
 APP_DIR = Path(__file__).resolve().parent
+
+
+def _audit_telemetry_frame(raw_df: pd.DataFrame, inferred_fields: list[str]) -> dict:
+    normalized = {col.strip().lower(): col for col in raw_df.columns}
+    missing_required = [col for col in REQUIRED_COLUMNS if col != "time" and col not in normalized]
+    optional_missing = [col for col in OPTIONAL_NUMERIC_COLUMNS if col not in normalized]
+    total_rows = len(raw_df)
+
+    sampling_rate_hz = None
+    if "time" in normalized or "time" in raw_df.columns:
+        time_col = normalized.get("time", "time")
+        time_series = pd.to_numeric(raw_df[time_col], errors="coerce")
+        dt = time_series.diff()
+        dt = dt[dt > 0]
+        if not dt.empty:
+            median_dt = float(dt.median())
+            if median_dt > 0:
+                sampling_rate_hz = 1.0 / median_dt
+
+    return {
+        "missing_required": missing_required,
+        "optional_missing": optional_missing,
+        "inferred_fields": inferred_fields,
+        "sampling_rate_hz": sampling_rate_hz,
+        "total_rows": total_rows,
+        "valid_rows": None,
+        "invalid_rows": None,
+        "label": "UNKNOWN",
+    }
+
+
+def _finalize_quality(audit: dict, valid_rows: int) -> dict:
+    total_rows = audit["total_rows"]
+    invalid_rows = max(total_rows - valid_rows, 0)
+    audit["valid_rows"] = valid_rows
+    audit["invalid_rows"] = invalid_rows
+
+    if audit["missing_required"] or valid_rows == 0:
+        label = "POOR"
+    else:
+        invalid_ratio = (invalid_rows / total_rows) if total_rows else 0.0
+        warn = False
+        if audit["sampling_rate_hz"] is None:
+            warn = True
+        if invalid_ratio > 0.05:
+            warn = True
+        if len(audit["optional_missing"]) >= 3:
+            warn = True
+        label = "WARNING" if warn else "GOOD"
+
+    audit["label"] = label
+    return audit
+
+
+def _format_quality_badge(audit: dict) -> tuple[str, str, str, str]:
+    sample_rate = audit["sampling_rate_hz"]
+    if sample_rate is None:
+        sample_rate_label = "UNKNOWN"
+    else:
+        sample_rate_label = f"{sample_rate:.2f} Hz"
+
+    missing_fields = audit["missing_required"] + audit["optional_missing"]
+    if not missing_fields:
+        missing_label = "NONE"
+    else:
+        missing_label = ", ".join(missing_fields[:3])
+        if len(missing_fields) > 3:
+            missing_label += f" +{len(missing_fields) - 3}"
+
+    inferred_label = "NONE"
+    if audit["inferred_fields"]:
+        inferred_label = ", ".join(audit["inferred_fields"])
+
+    return audit["label"], sample_rate_label, missing_label, inferred_label
 
 
 def _build_live_features(df: pd.DataFrame, anomaly_threshold: float) -> pd.DataFrame:
@@ -196,6 +275,23 @@ def _resolve_turbofan_model_data_uri(uploaded_model) -> tuple[str | None, str | 
     return None, None
 
 
+def _load_falconeye_gesture_sources() -> dict:
+    base = APP_DIR / "assets" / "falconeye"
+    module_paths = [
+        "tracking/handTracker.js",
+        "gestures/gestureRecognizer.js",
+        "interaction/interactionSphere.js",
+        "interaction/gestureRouter.js",
+        "ui/hologramControls.js",
+    ]
+    sources = {}
+    for rel_path in module_paths:
+        module_path = base / rel_path
+        if module_path.exists():
+            sources[rel_path] = module_path.read_text(encoding="utf-8")
+    return sources
+
+
 def _threejs_rafale_html(
     model_data_uri: str,
     engine_model_data_uri: str | None,
@@ -204,6 +300,7 @@ def _threejs_rafale_html(
     enable_hand_tracking: bool,
 ) -> str:
     status = str(risk_level).upper()
+    gesture_sources = _load_falconeye_gesture_sources()
     return f"""
 <div id="rafale-wrap" style="width:100%;height:620px;position:relative;background:radial-gradient(circle at 20% 15%, #10161c, #05080b 55%);border:1px solid #00ff66;">
   <div style="position:absolute;top:10px;left:12px;color:#00ff66;font-family:Rajdhani,Segoe UI,sans-serif;letter-spacing:1px;z-index:10;">
@@ -224,6 +321,8 @@ def _threejs_rafale_html(
   const anomalyPayload = {json.dumps(anomaly_payload)};
   const handTrackingEnabled = {"true" if enable_hand_tracking else "false"};
   const riskLevel = String((anomalyPayload && anomalyPayload.risk) || "normal").toLowerCase();
+  const falconeyeSources = {json.dumps(gesture_sources)};
+  const useLegacyHandTracking = false;
 
   function loadScript(url) {{
     return new Promise((resolve, reject) => {{
@@ -739,7 +838,103 @@ def _threejs_rafale_html(
     return extended >= 1 && extended <= 3;
   }}
 
-  async function initHandTracking() {{
+  function loadFalconEyeModules() {{
+    if (!falconeyeSources || Object.keys(falconeyeSources).length === 0) return false;
+    if (window.FalconEye && window.FalconEye.__loaded) return true;
+    window.FalconEye = window.FalconEye || {{}};
+    const order = [
+      "tracking/handTracker.js",
+      "gestures/gestureRecognizer.js",
+      "interaction/interactionSphere.js",
+      "interaction/gestureRouter.js",
+      "ui/hologramControls.js"
+    ];
+    for (const name of order) {{
+      const source = falconeyeSources[name];
+      if (!source) continue;
+      const tag = document.createElement("script");
+      tag.type = "text/javascript";
+      tag.textContent = source + "\\n//# sourceURL=" + name;
+      document.head.appendChild(tag);
+    }}
+    window.FalconEye.__loaded = true;
+    return true;
+  }}
+
+  async function initFalconEyeGestureSystem() {{
+    if (!handTrackingEnabled) return;
+    if (window.__falconeyeGestureActive) return;
+    if (!loadFalconEyeModules()) {{
+      statusEl.textContent = "Gesture modules missing";
+      return;
+    }}
+    if (!window.FalconEye || !window.FalconEye.tracking || !window.FalconEye.gestures) {{
+      statusEl.textContent = "Gesture system failed to load";
+      return;
+    }}
+    if (!trackedModel) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
+      statusEl.textContent = "Camera access unavailable";
+      return;
+    }}
+
+    const video = document.createElement("video");
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.style.display = "none";
+    rootEl.appendChild(video);
+
+    const tracker = new window.FalconEye.tracking.HandTracker({{
+      camera,
+      video,
+      maxHands: 2,
+      depthBase: 0.45,
+      depthScale: 0.65
+    }});
+    const recognizer = new window.FalconEye.gestures.GestureRecognizer({{
+      bufferSize: 10,
+      smoothingWindow: 4,
+      pinchThreshold: 0.04,
+      swipeThreshold: 0.12
+    }});
+    const sphere = new window.FalconEye.interaction.InteractionSphere({{
+      camera,
+      radius: 0.6,
+      scene,
+      visible: false
+    }});
+    const ui = new window.FalconEye.ui.HologramControls({{
+      model: trackedModel,
+      camera,
+      controls,
+      scene,
+      statusEl,
+      overlayRoot: rootEl
+    }});
+    const router = new window.FalconEye.interaction.GestureRouter({{
+      recognizer,
+      sphere,
+      ui,
+      pointHoldFrames: 10
+    }});
+
+    tracker.onFrame = (frame) => {{
+      router.update(frame, camera);
+      ui.update(frame);
+    }};
+
+    try {{
+      await tracker.start();
+      window.__falconeyeGestureActive = true;
+      statusEl.textContent = "Gesture system active";
+    }} catch (err) {{
+      console.error("Gesture init failed", err);
+      statusEl.textContent = "Gesture system failed to start";
+    }}
+  }}
+
+  async function initLegacyHandTracking() {{
     if (!handTrackingEnabled) return;
     if (!window.Hands || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
       statusEl.textContent = "Viewer loaded (hand tracking unavailable)";
@@ -762,15 +957,6 @@ def _threejs_rafale_html(
       if (tourCooldownFrames > 0) tourCooldownFrames -= 1;
       statusEl.textContent = "Hand tracking active";
 
-      const anyFist = handLandmarks.some((lm) => detectFist(lm));
-      if (anyFist && !handPaused) {{
-        stopAnomalyTour();
-        resetTrackingState();
-        resetModelToDefault();
-        handPaused = true;
-        statusEl.textContent = "Reset to default (fist)";
-        return;
-      }}
       if (handPaused) {{
         if (handLandmarks.some((lm) => detectOpenPalm(lm))) {{
           handPaused = false;
@@ -1031,7 +1217,7 @@ def _threejs_rafale_html(
         statusEl.textContent = handTrackingEnabled
           ? "Viewer loaded (starting hand tracking...)"
           : "Viewer loaded" + (attached ? " + twin engines mounted" : "");
-        initHandTracking();
+        initFalconEyeGestureSystem();
       }});
     }},
     function(evt) {{
@@ -1061,7 +1247,7 @@ def _threejs_rafale_html(
   window.addEventListener("resize", onResize);
 
   function animate() {{
-    if (trackedModel && handTrackingEnabled && !handPaused && !anomalyTourActive) {{
+    if (trackedModel && handTrackingEnabled && useLegacyHandTracking && !handPaused && !anomalyTourActive) {{
       trackedModel.position.x = THREE.MathUtils.lerp(trackedModel.position.x, basePosition.x + desiredOffset.x, 0.22);
       trackedModel.position.y = THREE.MathUtils.lerp(trackedModel.position.y, basePosition.y + desiredOffset.y, 0.22);
       trackedModel.position.z = THREE.MathUtils.lerp(trackedModel.position.z, basePosition.z + desiredOffset.z, 0.20);
@@ -1506,15 +1692,23 @@ throttle_variation = st.sidebar.slider(
 
 data = None
 source_label = "ENGINE MODEL"
+data_quality = None
 
 if uploaded_file is not None:
     try:
         raw_data = pd.read_csv(uploaded_file)
+        inferred_fields = []
         normalized = {col.strip().lower(): col for col in raw_data.columns}
         if "time" not in normalized:
             raw_data["time"] = np.arange(len(raw_data))
+            inferred_fields.append("time")
+        data_quality = _audit_telemetry_frame(raw_data, inferred_fields)
+        if data_quality["missing_required"]:
+            missing_text = ", ".join(data_quality["missing_required"])
+            raise ValueError(f"Missing required columns: {missing_text}")
         data = normalize_telemetry_frame(raw_data)
         source_label = "UPLOADED CSV"
+        data_quality = _finalize_quality(data_quality, len(data))
         st.sidebar.success(f"Loaded {len(data)} rows from CSV")
 
     except Exception as exc:
@@ -1533,6 +1727,16 @@ if data is None:
 
     model = EngineStateModel(rng_seed=42)
     data = model.run_profile(throttle_profile, dt=0.5)
+    data_quality = {
+        "missing_required": [],
+        "optional_missing": [],
+        "inferred_fields": [],
+        "sampling_rate_hz": 2.0,
+        "total_rows": len(data),
+        "valid_rows": len(data),
+        "invalid_rows": 0,
+        "label": "SYNTHETIC",
+    }
 else:
     processor = StreamingTelemetryProcessor(max_buffer_size=max(len(data), 1000))
     records = data.to_dict("records")
@@ -1553,6 +1757,16 @@ col1.metric("TOTAL SAMPLES", len(data))
 col2.metric("TOTAL ANOMALIES", len(anomalies))
 col3.metric("SYSTEM STATUS", "STABLE" if len(anomalies) < len(data) * 0.1 else "WARNING")
 col4.metric("DATA SOURCE", source_label)
+
+quality_label, sample_rate_label, missing_label, inferred_label = _format_quality_badge(data_quality)
+q1, q2, q3 = st.columns(3)
+q1.metric("DATA QUALITY", quality_label)
+q2.metric("SAMPLE RATE", sample_rate_label)
+q3.metric("MISSING FIELDS", missing_label)
+st.caption(
+    f"Inferred fields: {inferred_label} | "
+    f"Invalid rows dropped: {data_quality['invalid_rows'] if data_quality else 0}"
+)
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
