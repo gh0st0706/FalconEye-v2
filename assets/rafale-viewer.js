@@ -20,17 +20,11 @@
     await viewer.load();
 */
 
-import * as THREE from "https://esm.sh/three@0.162.0";
-import { OrbitControls } from "https://esm.sh/three@0.162.0/examples/jsm/controls/OrbitControls.js";
-import { GLTFLoader } from "https://esm.sh/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
-import { HandLandmarker, FilesetResolver } from "https://esm.sh/@mediapipe/tasks-vision@0.10.14";
+import * as THREE from "https://unpkg.com/three@0.162.0/build/three.module.js";
+import { OrbitControls } from "https://unpkg.com/three@0.162.0/examples/jsm/controls/OrbitControls.js";
+import { GLTFLoader } from "https://unpkg.com/three@0.162.0/examples/jsm/loaders/GLTFLoader.js";
 
 const DEFAULT_ENGINE_TOKENS = ["engine", "nozzle", "turbine", "exhaust", "afterburner"];
-const DEFAULT_ANOMALY_REGION_TOKENS = {
-  thermal: ["engine", "nozzle", "exhaust", "afterburner", "turbine"],
-  vibration: ["turbine", "fan", "compressor", "shaft", "engine"],
-  efficiency: ["intake", "inlet", "compressor", "exhaust", "engine"],
-};
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
@@ -51,7 +45,6 @@ export function createRafaleViewer(config) {
 
   const container = config.container;
   const modelUrl = config.modelUrl;
-  const engineModelUrl = config.engineModelUrl ?? null;
   const targetModelSpan = config.targetModelSpan ?? 8.0; // world units
   const debug = config.debug ?? true;
   const background = config.background ?? 0x06090d;
@@ -134,27 +127,6 @@ export function createRafaleViewer(config) {
   let animationFrame = null;
   const materialBackup = new WeakMap();
   const engineMeshes = [];
-  const edgeOverlays = [];
-  let skeletonEnabled = config.skeletonEnabled ?? true;
-  const baseSkeletonColor = config.skeletonColor || "#7fffb2";
-  const baseSkeletonLineOpacity = config.skeletonLineOpacity ?? 0.95;
-  const baseSkeletonSurfaceOpacity = config.skeletonSurfaceOpacity ?? 0.08;
-  const handTrackingEnabled = config.enableHandTracking ?? false;
-  let mpVideo = null;
-  let mpStream = null;
-  let handLandmarker = null;
-  let lastHandTs = 0;
-  let desiredHandRotation = { pitch: 0.0, yaw: 0.0, roll: 0.0 };
-  let baseModelRotation = new THREE.Euler(0.0, 0.0, 0.0, "XYZ");
-  const interactionState = {
-    hasBaseline: false,
-    baselineAvgDepth: 0.0,
-    baselineHandGap: 0.0,
-    smoothedPitch: 0.0,
-    smoothedYaw: 0.0,
-    smoothedRoll: 0.0,
-    pausedByFist: false,
-  };
 
   function debugHierarchy(node, depth = 0) {
     if (!debug) return;
@@ -163,184 +135,6 @@ export function createRafaleViewer(config) {
     console.log(`${indent}${marker} ${node.name || "(unnamed)"} (${node.type})`);
     for (const child of node.children || []) {
       debugHierarchy(child, depth + 1);
-    }
-  }
-
-  // Thumb tip (4) + index tip (8) pinch detector.
-  function detectPinch(landmarks, threshold = 0.055) {
-    if (!landmarks || landmarks.length < 21) return false;
-    const dx = landmarks[4].x - landmarks[8].x;
-    const dy = landmarks[4].y - landmarks[8].y;
-    const dz = (landmarks[4].z || 0) - (landmarks[8].z || 0);
-    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    return dist < threshold;
-  }
-
-  // Closed fist detector: fingertips below their knuckle chain in image Y.
-  function detectFist(landmarks) {
-    if (!landmarks || landmarks.length < 21) return false;
-    const folded =
-      landmarks[8].y > landmarks[6].y &&
-      landmarks[12].y > landmarks[10].y &&
-      landmarks[16].y > landmarks[14].y &&
-      landmarks[20].y > landmarks[18].y;
-    const thumbFolded = landmarks[4].y > landmarks[3].y;
-    return folded && thumbFolded;
-  }
-
-  function detectOpenPalm(landmarks) {
-    if (!landmarks || landmarks.length < 21) return false;
-    return (
-      landmarks[8].y < landmarks[6].y &&
-      landmarks[12].y < landmarks[10].y &&
-      landmarks[16].y < landmarks[14].y &&
-      landmarks[20].y < landmarks[18].y
-    );
-  }
-
-  function palmCenter(landmarks) {
-    return landmarks[9];
-  }
-
-  // Two-hand "holding" model:
-  // - roll: line between palms in image plane
-  // - pitch: average palm depth shift (forward/back)
-  // - yaw: relative palm depth difference (left vs right hand)
-  function computeTwoHandRotation(leftHand, rightHand, state) {
-    const leftPalm = palmCenter(leftHand);
-    const rightPalm = palmCenter(rightHand);
-    const dx = rightPalm.x - leftPalm.x;
-    const dy = rightPalm.y - leftPalm.y;
-    const dz = (rightPalm.z || 0) - (leftPalm.z || 0);
-
-    const avgDepth = ((leftPalm.z || 0) + (rightPalm.z || 0)) * 0.5;
-    const gap = Math.hypot(dx, dy);
-
-    if (!state.hasBaseline) {
-      state.baselineAvgDepth = avgDepth;
-      state.baselineHandGap = gap;
-      state.hasBaseline = true;
-    }
-
-    const rawRoll = -Math.atan2(dy, Math.max(1e-6, dx)) * 0.95;
-    const rawPitch = (state.baselineAvgDepth - avgDepth) * 5.2;
-    const rawYaw = dz * 6.0;
-
-    const alpha = 0.18; // exponential smoothing
-    state.smoothedRoll += (rawRoll - state.smoothedRoll) * alpha;
-    state.smoothedPitch += (rawPitch - state.smoothedPitch) * alpha;
-    state.smoothedYaw += (rawYaw - state.smoothedYaw) * alpha;
-
-    return {
-      pitch: THREE.MathUtils.clamp(state.smoothedPitch, -0.78, 0.78),
-      yaw: THREE.MathUtils.clamp(state.smoothedYaw, -1.10, 1.10),
-      roll: THREE.MathUtils.clamp(state.smoothedRoll, -0.95, 0.95),
-      handGap: gap,
-    };
-  }
-
-  function updateAircraft(rotation, smooth = 0.16) {
-    if (!aircraft) return;
-    aircraft.rotation.x = THREE.MathUtils.lerp(aircraft.rotation.x, baseModelRotation.x + rotation.pitch, smooth);
-    aircraft.rotation.y = THREE.MathUtils.lerp(aircraft.rotation.y, baseModelRotation.y + rotation.yaw, smooth);
-    aircraft.rotation.z = THREE.MathUtils.lerp(aircraft.rotation.z, baseModelRotation.z + rotation.roll, smooth * 0.9);
-  }
-
-  async function initMediaPipeHandTracking() {
-    if (!handTrackingEnabled) return;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      progressEl.textContent = "Hand tracking unavailable (no camera API)";
-      return;
-    }
-    try {
-      progressEl.textContent = "Loading MediaPipe hand tracking...";
-      const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-      );
-      handLandmarker = await HandLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath:
-            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
-        },
-        runningMode: "VIDEO",
-        numHands: 1,
-      });
-      mpVideo = document.createElement("video");
-      mpVideo.autoplay = true;
-      mpVideo.muted = true;
-      mpVideo.playsInline = true;
-      mpVideo.style.display = "none";
-      container.appendChild(mpVideo);
-      mpStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
-        audio: false,
-      });
-      mpVideo.srcObject = mpStream;
-      await mpVideo.play();
-      progressEl.textContent = "Hand tracking active";
-    } catch (err) {
-      console.error("MediaPipe hand tracking init failed:", err);
-      progressEl.textContent = "Hand tracking blocked/unavailable";
-    }
-  }
-
-  function updateMediaPipeHandTracking() {
-    if (!handTrackingEnabled || !handLandmarker || !mpVideo || mpVideo.readyState < 2 || !aircraft) return;
-    const now = performance.now();
-    if (now - lastHandTs < 33) return;
-    lastHandTs = now;
-    const result = handLandmarker.detectForVideo(mpVideo, now);
-    if (!result?.landmarks?.length) return;
-
-    const hands = result.landmarks;
-    const handedness = result.handednesses || [];
-
-    const leftIdx = handedness.findIndex((h) => (h[0]?.categoryName || "").toLowerCase() === "left");
-    const rightIdx = handedness.findIndex((h) => (h[0]?.categoryName || "").toLowerCase() === "right");
-    const leftHand = leftIdx >= 0 ? hands[leftIdx] : hands[0];
-    const rightHand = rightIdx >= 0 ? hands[rightIdx] : hands[Math.min(1, hands.length - 1)];
-
-    const fistDetected = hands.some((h) => detectFist(h));
-    if (fistDetected && !interactionState.pausedByFist) {
-      interactionState.pausedByFist = true;
-      trackingEl.textContent = "Hand tracking paused (fist)";
-      return;
-    }
-
-    if (interactionState.pausedByFist) {
-      const openPalmSeen = hands.some((h) => detectOpenPalm(h));
-      if (!openPalmSeen) return;
-      interactionState.pausedByFist = false;
-      interactionState.hasBaseline = false;
-      trackingEl.textContent = "Hand tracking resumed (open palm)";
-    }
-
-    if (hands.length < 2) {
-      trackingEl.textContent = "Show both hands to hold aircraft";
-      return;
-    }
-
-    const rotation = computeTwoHandRotation(leftHand, rightHand, interactionState);
-    desiredHandRotation = rotation;
-    trackingEl.textContent = "Two-hand hold active";
-
-    // Pinch-to-zoom: both hands pinching, hand gap change controls camera distance.
-    const leftPinch = detectPinch(leftHand);
-    const rightPinch = detectPinch(rightHand);
-    if (leftPinch && rightPinch) {
-      const prevGap = interactionState.baselineHandGap || rotation.handGap;
-      const gapDelta = rotation.handGap - prevGap;
-      interactionState.baselineHandGap = rotation.handGap;
-
-      const toCam = camera.position.clone().sub(controls.target).normalize();
-      const currentDistance = camera.position.distanceTo(controls.target);
-      const nextDistance = THREE.MathUtils.clamp(
-        currentDistance - gapDelta * 28.0, // apart -> zoom in, closer -> zoom out
-        4.5,
-        26.0
-      );
-      camera.position.copy(controls.target.clone().add(toCam.multiplyScalar(nextDistance)));
-      trackingEl.textContent = "Pinch zoom active";
     }
   }
 
@@ -372,85 +166,6 @@ export function createRafaleViewer(config) {
       maxDim: Math.max(centeredSize.x, centeredSize.y, centeredSize.z),
       scale,
     };
-  }
-
-  async function loadGltfScene(loader, url) {
-    if (!url) return null;
-    const gltf = await new Promise((resolve, reject) => {
-      loader.load(url, (res) => resolve(res), undefined, (err) => reject(err));
-    });
-    return gltf.scene || gltf.scenes?.[0] || null;
-  }
-
-  function findWingAnchors(model) {
-    // Default offsets requested by user.
-    const fallback = {
-      left: new THREE.Vector3(-2.0, -0.5, 0.5),
-      right: new THREE.Vector3(2.0, -0.5, 0.5),
-    };
-
-    const wingCandidates = [];
-    model.traverse((obj) => {
-      if (!obj.isMesh) return;
-      const n = (obj.name || "").toLowerCase();
-      if (!n.includes("wing")) return;
-      const bb = new THREE.Box3().setFromObject(obj);
-      const c = bb.getCenter(new THREE.Vector3());
-      wingCandidates.push({ name: n, center: c });
-    });
-
-    if (wingCandidates.length === 0) return fallback;
-
-    const leftMatches = wingCandidates.filter((w) => w.name.includes("left") || w.name.includes("_l"));
-    const rightMatches = wingCandidates.filter((w) => w.name.includes("right") || w.name.includes("_r"));
-    const leftByPos = wingCandidates.filter((w) => w.center.x < 0).sort((a, b) => a.center.x - b.center.x);
-    const rightByPos = wingCandidates.filter((w) => w.center.x > 0).sort((a, b) => b.center.x - a.center.x);
-
-    const left = (leftMatches[0]?.center || leftByPos[0]?.center || fallback.left.clone()).clone();
-    const right = (rightMatches[0]?.center || rightByPos[0]?.center || fallback.right.clone()).clone();
-
-    // Move engines slightly below and forward of wing centers.
-    left.add(new THREE.Vector3(0.0, -0.35, 0.45));
-    right.add(new THREE.Vector3(0.0, -0.35, 0.45));
-    return { left, right };
-  }
-
-  async function attachTwinEngines(loader, model) {
-    const fallbackEngineUrl = config.defaultEngineModelUrl ?? "assets/turbofan.glb";
-    const template = await loadGltfScene(loader, engineModelUrl || fallbackEngineUrl);
-    if (!template) {
-      if (debug) console.warn("No engine model could be loaded; skipping engine mount.");
-      return false;
-    }
-
-    const anchors = findWingAnchors(model);
-    const aircraftBox = new THREE.Box3().setFromObject(model);
-    const aircraftSize = aircraftBox.getSize(new THREE.Vector3());
-    const aircraftMax = Math.max(aircraftSize.x, aircraftSize.y, aircraftSize.z, 1e-6);
-
-    const engineBox = new THREE.Box3().setFromObject(template);
-    const engineSize = engineBox.getSize(new THREE.Vector3());
-    const engineMax = Math.max(engineSize.x, engineSize.y, engineSize.z, 1e-6);
-    const engineScale = (aircraftMax * 0.14) / engineMax;
-
-    const leftEngine = template.clone(true);
-    const rightEngine = template.clone(true);
-    leftEngine.name = "engine_left";
-    rightEngine.name = "engine_right";
-
-    leftEngine.position.copy(anchors.left);
-    rightEngine.position.copy(anchors.right);
-    leftEngine.scale.setScalar(engineScale);
-    rightEngine.scale.setScalar(engineScale);
-
-    // Slight cant for under-wing mounting.
-    leftEngine.rotation.set(0.0, 0.0, 0.05);
-    rightEngine.rotation.set(0.0, 0.0, -0.05);
-
-    model.add(leftEngine);
-    model.add(rightEngine);
-    if (debug) console.log("Mounted twin engines:", leftEngine.name, rightEngine.name);
-    return true;
   }
 
   function fitCameraToModel(bounds, animate = false) {
@@ -511,9 +226,6 @@ export function createRafaleViewer(config) {
       emissive: mesh.material.emissive ? mesh.material.emissive.clone() : null,
       emissiveIntensity:
         typeof mesh.material.emissiveIntensity === "number" ? mesh.material.emissiveIntensity : null,
-      opacity: typeof mesh.material.opacity === "number" ? mesh.material.opacity : 1.0,
-      transparent: !!mesh.material.transparent,
-      depthWrite: typeof mesh.material.depthWrite === "boolean" ? mesh.material.depthWrite : true,
     });
   }
 
@@ -523,66 +235,6 @@ export function createRafaleViewer(config) {
     if (backup.color && mesh.material.color) mesh.material.color.copy(backup.color);
     if (backup.emissive && mesh.material.emissive) mesh.material.emissive.copy(backup.emissive);
     if (backup.emissiveIntensity != null) mesh.material.emissiveIntensity = backup.emissiveIntensity;
-    mesh.material.opacity = backup.opacity;
-    mesh.material.transparent = backup.transparent;
-    mesh.material.depthWrite = backup.depthWrite;
-    mesh.material.needsUpdate = true;
-  }
-
-  function clearEdgeOverlays() {
-    for (const edge of edgeOverlays) {
-      if (edge.parent) edge.parent.remove(edge);
-      if (edge.geometry) edge.geometry.dispose();
-      if (edge.material) edge.material.dispose();
-    }
-    edgeOverlays.length = 0;
-  }
-
-  function setMeshEdgeColor(mesh, color, opacity = 1.0) {
-    for (const child of mesh.children || []) {
-      if (!child.isLineSegments || !child.material) continue;
-      if (child.material.color) child.material.color.set(color);
-      child.material.opacity = opacity;
-      child.material.transparent = true;
-      child.material.needsUpdate = true;
-    }
-  }
-
-  function resetAllEdgeColors() {
-    if (!aircraft) return;
-    aircraft.traverse((obj) => {
-      if (!obj.isMesh) return;
-      setMeshEdgeColor(obj, baseSkeletonColor, baseSkeletonLineOpacity);
-    });
-  }
-
-  function applySkeletonView(
-    model,
-    { enabled = true, lineColor = "#7fffb2", lineOpacity = 0.95, surfaceOpacity = 0.08, thresholdAngle = 18 } = {}
-  ) {
-    clearEdgeOverlays();
-    model.traverse((obj) => {
-      if (!obj.isMesh || !obj.geometry || !obj.material) return;
-      backupMaterial(obj);
-      obj.material.transparent = enabled;
-      obj.material.opacity = enabled ? surfaceOpacity : 1.0;
-      obj.material.depthWrite = !enabled;
-      obj.material.side = THREE.DoubleSide;
-      obj.material.needsUpdate = true;
-
-      if (!enabled) return;
-      const edges = new THREE.EdgesGeometry(obj.geometry, thresholdAngle);
-      const edgeMat = new THREE.LineBasicMaterial({
-        color: new THREE.Color(lineColor),
-        transparent: true,
-        opacity: lineOpacity,
-      });
-      const edgeLines = new THREE.LineSegments(edges, edgeMat);
-      edgeLines.name = `edge-${obj.name || "mesh"}`;
-      edgeLines.renderOrder = 2;
-      obj.add(edgeLines);
-      edgeOverlays.push(edgeLines);
-    });
   }
 
   function setAnomalyState(state = "normal") {
@@ -612,15 +264,7 @@ export function createRafaleViewer(config) {
   }
 
   function clearAnomalyHighlight() {
-    if (aircraft) {
-      aircraft.traverse((obj) => {
-        if (!obj.isMesh || !obj.material) return;
-        restoreMaterial(obj);
-      });
-      if (skeletonEnabled) resetAllEdgeColors();
-    } else {
-      for (const mesh of engineMeshes) restoreMaterial(mesh);
-    }
+    for (const mesh of engineMeshes) restoreMaterial(mesh);
   }
 
   function highlightParts(tokens, color = "#ffd400", intensity = 0.9) {
@@ -640,67 +284,6 @@ export function createRafaleViewer(config) {
       hits.push(obj.name || "(unnamed)");
     });
     return hits;
-  }
-
-  function highlightAnomalyRegions(
-    regions = [],
-    { color = "#ff1a1a", intensity = 1.15, clearExisting = true, fallbackToEngine = true, surfaceOpacity = 0.62 } = {}
-  ) {
-    if (!aircraft) return [];
-    if (clearExisting) clearAnomalyHighlight();
-
-    const regionDefs = Array.isArray(regions) ? regions : [];
-    const matched = [];
-    const colorObj = new THREE.Color(color);
-
-    const normalized = regionDefs.map((region) => {
-      const key = String(region?.key || region?.label || "").toLowerCase();
-      const defaultTokens = DEFAULT_ANOMALY_REGION_TOKENS[key] || [];
-      const tokens = (Array.isArray(region?.tokens) && region.tokens.length > 0)
-        ? region.tokens.map((t) => String(t).toLowerCase())
-        : defaultTokens;
-      return {
-        label: region?.label || key || "anomaly",
-        tokens,
-      };
-    }).filter((r) => r.tokens.length > 0);
-
-    aircraft.traverse((obj) => {
-      if (!obj.isMesh || !obj.material) return;
-      const n = (obj.name || "").toLowerCase();
-      const hitRegion = normalized.find((r) => r.tokens.some((token) => n.includes(token)));
-      if (!hitRegion) return;
-      backupMaterial(obj);
-      if (obj.material.color) obj.material.color.lerp(colorObj, 0.55);
-      if (!obj.material.emissive) obj.material.emissive = colorObj.clone();
-      obj.material.emissive.copy(colorObj);
-      obj.material.emissiveIntensity = intensity;
-      obj.material.transparent = true;
-      obj.material.opacity = surfaceOpacity;
-      obj.material.depthWrite = true;
-      obj.material.needsUpdate = true;
-      if (skeletonEnabled) setMeshEdgeColor(obj, color, 1.0);
-      matched.push({ mesh: obj.name || "(unnamed)", region: hitRegion.label });
-    });
-
-    if (fallbackToEngine && matched.length === 0) {
-      for (const mesh of engineMeshes) {
-        if (!mesh.material) continue;
-        backupMaterial(mesh);
-        if (mesh.material.color) mesh.material.color.lerp(colorObj, 0.55);
-        if (!mesh.material.emissive) mesh.material.emissive = colorObj.clone();
-        mesh.material.emissive.copy(colorObj);
-        mesh.material.emissiveIntensity = intensity;
-        mesh.material.transparent = true;
-        mesh.material.opacity = surfaceOpacity;
-        mesh.material.depthWrite = true;
-        mesh.material.needsUpdate = true;
-        if (skeletonEnabled) setMeshEdgeColor(mesh, color, 1.0);
-        matched.push({ mesh: mesh.name || "(unnamed)", region: "engine-fallback" });
-      }
-    }
-
-    return matched;
   }
 
   // External telemetry hook: angles in radians.
@@ -730,10 +313,6 @@ export function createRafaleViewer(config) {
       if (ground.material) {
         ground.material.emissive = new THREE.Color(0x00ff66);
         ground.material.emissiveIntensity = 0.012 + 0.008 * Math.sin(t * 1.4);
-      }
-      updateMediaPipeHandTracking();
-      if (aircraft && handTrackingEnabled && !interactionState.pausedByFist) {
-        updateAircraft(desiredHandRotation, 0.16);
       }
       controls.update();
       renderer.render(scene, camera);
@@ -776,25 +355,9 @@ export function createRafaleViewer(config) {
     rootGroup.clear();
     rootGroup.add(aircraft);
 
-    normalizeModel(aircraft);
-    try {
-      await attachTwinEngines(loader, aircraft);
-    } catch (engineErr) {
-      if (debug) console.warn("Engine attachment failed:", engineErr);
-    }
-    const bounds = { box: new THREE.Box3().setFromObject(aircraft) };
-    baseModelRotation = new THREE.Euler(aircraft.rotation.x, aircraft.rotation.y, aircraft.rotation.z, "XYZ");
-    interactionState.hasBaseline = false;
-    interactionState.pausedByFist = false;
+    const bounds = normalizeModel(aircraft);
     fitCameraToModel(bounds, false);
     collectEngineMeshes(aircraft, config.engineTokens || DEFAULT_ENGINE_TOKENS);
-    applySkeletonView(aircraft, {
-      enabled: skeletonEnabled,
-      lineColor: baseSkeletonColor,
-      lineOpacity: baseSkeletonLineOpacity,
-      surfaceOpacity: baseSkeletonSurfaceOpacity,
-      thresholdAngle: config.skeletonThresholdAngle ?? 18,
-    });
 
     progressEl.textContent = "Model loaded";
     setTimeout(() => {
@@ -803,14 +366,12 @@ export function createRafaleViewer(config) {
     }, 600);
 
     if (!animationFrame) startRenderLoop();
-    if (handTrackingEnabled) initMediaPipeHandTracking();
     return { bounds, engineMeshes: [...engineMeshes] };
   }
 
   function dispose() {
     if (animationFrame) cancelAnimationFrame(animationFrame);
     animationFrame = null;
-    clearEdgeOverlays();
     window.removeEventListener("resize", onResize);
     controls.dispose();
     renderer.dispose();
@@ -820,13 +381,6 @@ export function createRafaleViewer(config) {
     if (progressEl.parentElement === container) {
       container.removeChild(progressEl);
     }
-    if (mpStream) {
-      for (const track of mpStream.getTracks()) track.stop();
-      mpStream = null;
-    }
-    if (mpVideo && mpVideo.parentElement === container) {
-      container.removeChild(mpVideo);
-    }
   }
 
   return {
@@ -835,22 +389,6 @@ export function createRafaleViewer(config) {
     setAnomalyState,
     clearAnomalyHighlight,
     highlightParts,
-    highlightAnomalyRegions,
-    setSkeletonMode: (enabled = true, options = {}) => {
-      skeletonEnabled = !!enabled;
-      if (!aircraft) return;
-      if (!skeletonEnabled) {
-        applySkeletonView(aircraft, { enabled: false });
-        return;
-      }
-      applySkeletonView(aircraft, {
-        enabled: true,
-        lineColor: options.lineColor || config.skeletonColor || "#7fffb2",
-        lineOpacity: options.lineOpacity ?? config.skeletonLineOpacity ?? 0.95,
-        surfaceOpacity: options.surfaceOpacity ?? config.skeletonSurfaceOpacity ?? 0.08,
-        thresholdAngle: options.thresholdAngle ?? config.skeletonThresholdAngle ?? 18,
-      });
-    },
     setTelemetryOrientation,
     fitCamera: () => {
       if (!aircraft) return;
